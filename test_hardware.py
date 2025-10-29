@@ -25,6 +25,7 @@ from hw.apds9960 import APDS9960
 from hw.bno085 import BNO085
 from hw.stepper import StepperDrive
 from hw.vacuum import Vacuum
+from hw.buzzer import Buzzer
 
 
 class Colors:
@@ -358,6 +359,60 @@ def test_vacuum() -> bool:
     return True
 
 
+def test_buzzer() -> bool:
+    """Test buzzer for audio feedback."""
+    print_header("BUZZER TEST")
+
+    print_test("Initializing buzzer")
+    try:
+        buzzer = Buzzer()
+        print_pass(f"Buzzer pin: GPIO{PINS.BUZZER}")
+    except Exception as e:
+        print_fail(f"Error: {e}")
+        return False
+
+    print("\n" + Colors.BOLD + "Buzzer Pattern Test:" + Colors.END)
+    print_info("Testing various beep patterns")
+    print_info("(You should hear different beep patterns)\n")
+
+    try:
+        print("  Single beep...")
+        buzzer.beep()
+        time.sleep(0.5)
+
+        print("  Double beep (Start pattern)...")
+        buzzer.beep_start()
+        time.sleep(0.5)
+
+        print("  Triple beep (Error pattern)...")
+        buzzer.beep_error()
+        time.sleep(0.5)
+
+        print("  Long beep (Warning pattern)...")
+        buzzer.beep_warning()
+        time.sleep(0.5)
+
+        print("  Ascending beeps (Finish pattern)...")
+        buzzer.beep_finish()
+        time.sleep(0.5)
+
+        print_pass("Buzzer test complete")
+
+        print("\n" + Colors.YELLOW + "NOTE:" + Colors.END + " Buzzer usage:")
+        print("  - Start cleaning: 2 short beeps")
+        print("  - Finish cleaning: 3 ascending beeps")
+        print("  - Error: 3 rapid beeps")
+        print("  - Warning: 1 long beep\n")
+
+        buzzer.cleanup()
+        return True
+
+    except Exception as e:
+        print_fail(f"Error during beep test: {e}")
+        buzzer.cleanup()
+        return False
+
+
 def test_summary(results: dict):
     """Print test summary."""
     print_header("TEST SUMMARY")
@@ -428,6 +483,10 @@ def main():
     # Test vacuum
     vacuum_ok = test_vacuum()
     results["Vacuum Motor"] = vacuum_ok
+
+    # Test buzzer
+    buzzer_ok = test_buzzer()
+    results["Buzzer"] = buzzer_ok
 
     # Print summary
     test_summary(results)

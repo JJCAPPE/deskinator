@@ -16,6 +16,7 @@ class Pins:
     LEFT_DIR: int = 21  # Driver Left  Dir  GPIO21
     LEFT_STEP: int = 20  # Driver Left  Step GPIO20
     VACUUM_PWM: int = 5  # Vacuum MOSFET     GPIO5
+    BUZZER: int = 12  # Buzzer/Beeper      GPIO12
     START_IN: int | None = None  # Optional start/gesture input
 
 

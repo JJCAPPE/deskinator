@@ -106,6 +106,10 @@ class SimPWM:
         """Change duty cycle."""
         self.duty_cycle = duty_cycle
 
+    def ChangeFrequency(self, frequency: float):
+        """Change frequency."""
+        self.frequency = frequency
+
     def stop(self):
         """Stop PWM."""
         self.running = False
