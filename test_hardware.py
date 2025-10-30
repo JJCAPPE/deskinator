@@ -26,6 +26,7 @@ from hw.bno085 import BNO085
 from hw.stepper import StepperDrive
 from hw.vacuum import Vacuum
 from hw.buzzer import Buzzer
+from hw.gesture import GestureSensor
 
 
 class Colors:
@@ -413,6 +414,63 @@ def test_buzzer() -> bool:
         return False
 
 
+def test_gesture_sensor() -> bool:
+    """Test gesture sensor for touchless control."""
+    print_header("GESTURE SENSOR TEST")
+
+    print_test("Initializing gesture sensor")
+    try:
+        gesture = GestureSensor(I2C_CONFIG.GESTURE_BUS, I2C_CONFIG.GESTURE_ADDR)
+        print_pass(f"I2C pins: SDA=GPIO{PINS.GESTURE_SDA}, SCL=GPIO{PINS.GESTURE_SCL}")
+    except Exception as e:
+        print_fail(f"Error: {e}")
+        return False
+
+    print("\n" + Colors.BOLD + "Gesture Detection Test:" + Colors.END)
+    print_info("Wave your hand over the sensor to test gesture detection")
+    print_info("Testing for 10 seconds - try UP, DOWN, LEFT, RIGHT gestures\n")
+
+    gesture_counts = {"up": 0, "down": 0, "left": 0, "right": 0}
+
+    try:
+        start_time = time.time()
+        last_gesture = "none"
+
+        while time.time() - start_time < 10.0:
+            detected = gesture.read_gesture()
+            if detected != "none" and detected != last_gesture:
+                gesture_counts[detected] += 1
+                print(
+                    f"  {Colors.GREEN}✓{Colors.END} Gesture detected: {Colors.BOLD}{detected.upper()}{Colors.END}"
+                )
+                last_gesture = detected
+                time.sleep(0.5)  # Debounce
+            time.sleep(0.05)
+
+        print()
+        if sum(gesture_counts.values()) > 0:
+            print_pass("Gestures detected:")
+            for direction, count in gesture_counts.items():
+                if count > 0:
+                    print(f"    {direction.upper()}: {count}x")
+        else:
+            print_warn("No gestures detected - wave hand over sensor")
+
+        print("\n" + Colors.YELLOW + "NOTE:" + Colors.END + " Gesture sensor usage:")
+        print("  - Wave UP or RIGHT to start cleaning")
+        print("  - Wave DOWN or LEFT to stop/cancel")
+        print("  - Requires software I2C on GPIO17/GPIO4")
+        print("  - See HARDWARE_SETUP.md for I2C configuration\n")
+
+        gesture.cleanup()
+        return True
+
+    except Exception as e:
+        print_fail(f"Error during gesture test: {e}")
+        gesture.cleanup()
+        return False
+
+
 def test_summary(results: dict):
     """Print test summary."""
     print_header("TEST SUMMARY")
@@ -444,8 +502,8 @@ def main():
     """Main test sequence."""
     print(f"\n{Colors.BOLD}{Colors.BLUE}")
     print("╔══════════════════════════════════════════════════════════╗")
-    print("║         DESKINATOR HARDWARE TEST SUITE                  ║")
-    print("║         Testing all sensors and motors                  ║")
+    print("║         DESKINATOR HARDWARE TEST SUITE                   ║")
+    print("║         Testing all sensors and motors                   ║")
     print("╚══════════════════════════════════════════════════════════╝")
     print(Colors.END)
 
@@ -487,6 +545,10 @@ def main():
     # Test buzzer
     buzzer_ok = test_buzzer()
     results["Buzzer"] = buzzer_ok
+
+    # Test gesture sensor
+    gesture_ok = test_gesture_sensor()
+    results["Gesture Sensor"] = gesture_ok
 
     # Print summary
     test_summary(results)

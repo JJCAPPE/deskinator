@@ -17,17 +17,21 @@ class Pins:
     LEFT_STEP: int = 20  # Driver Left  Step GPIO20
     VACUUM_PWM: int = 5  # Vacuum MOSFET     GPIO5
     BUZZER: int = 12  # Buzzer/Beeper      GPIO12
-    START_IN: int | None = None  # Optional start/gesture input
+    # Gesture sensor I2C (separate bus or software I2C)
+    GESTURE_SDA: int = 17  # Gesture APDS9960 SDA GPIO17
+    GESTURE_SCL: int = 4  # Gesture APDS9960 SCL GPIO4
 
 
 @dataclass
 class I2CParams:
     """I2C bus configuration and device addresses."""
 
-    BUS: int = 1
+    BUS: int = 1  # Main I2C bus for sensors/IMU
+    GESTURE_BUS: int = 3  # I2C bus for gesture sensor (or use software I2C)
     ADDR_IMU: int | None = None  # set via i2cdetect
     ADDR_MUX: int = 0x70  # TCA9548A default
     APDS_ADDR: int = 0x39  # APDS9960 default
+    GESTURE_ADDR: int = 0x39  # Gesture APDS9960 (on separate bus)
     MUX_CHANS: tuple[int, int, int, int] = (0, 1, 2, 3)
     LEFT_PAIR: tuple[int, int] = (0, 1)  # define exact channels later
     RIGHT_PAIR: tuple[int, int] = (2, 3)
@@ -43,9 +47,9 @@ class Geometry:
     WHEEL_BASE: float = 0.170  # m (update from CAD)
     STEPS_PER_M: float = 6400.0  # set from microstepping/drive
     SENSOR_FWD: float = 0.080  # m; sensors lead axle
-    SENSOR_LAT: tuple[float, ...] = (+0.040, +0.015, -0.015, -0.040)  # m
-    VAC_WIDTH: float = 0.160  # m; effective cleaned width
-    SENSOR_TO_VAC: float = 0.015  # m; vacuum ahead of sensors
+    SENSOR_LAT: tuple[float, ...] = (+0.08484, +0.05444, -0.0544, -0.08484)  # m
+    VAC_WIDTH: float = 0.198  # m; effective cleaned width
+    SENSOR_TO_VAC: float = 0.03949  # m; vacuum ahead of sensors
 
 
 @dataclass
@@ -78,7 +82,6 @@ class Algo:
     POST_EDGE_SIDE_STEP: float = 0.05  # m
 
 
-# Global configuration instances
 PINS = Pins()
 I2C = I2CParams()
 GEOM = Geometry()

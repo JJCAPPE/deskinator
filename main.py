@@ -14,6 +14,8 @@ from .config import PINS, I2C, GEOM, LIMS, ALG
 from .hw.gpio import gpio_manager
 from .hw.stepper import StepperDrive
 from .hw.vacuum import Vacuum
+from .hw.buzzer import Buzzer
+from .hw.gesture import GestureSensor
 from .hw.i2c import I2CBus
 from .hw.tca9548a import TCA9548A
 from .hw.apds9960 import APDS9960
@@ -50,6 +52,26 @@ class Deskinator:
         print("[Init] Initializing hardware...")
         self.stepper = StepperDrive()
         self.vacuum = Vacuum()
+
+        self.buzzer = None
+        try:
+            self.buzzer = Buzzer()
+            print(f"  Buzzer ready on GPIO{PINS.BUZZER}")
+        except Exception as e:
+            print(f"[Init] Warning: Buzzer unavailable ({e})")
+
+        self.gesture = None
+        try:
+            self.gesture = GestureSensor(I2C.GESTURE_BUS, I2C.GESTURE_ADDR)
+            if getattr(self.gesture, "sim_mode", False):
+                print("  Gesture sensor in simulation mode")
+            else:
+                print(
+                    "  Gesture sensor ready on bus "
+                    f"{I2C.GESTURE_BUS} @ 0x{I2C.GESTURE_ADDR:02x}"
+                )
+        except Exception as e:
+            print(f"[Init] Warning: Gesture sensor unavailable ({e})")
 
         # I2C devices
         self.i2c = I2CBus(I2C.BUS)
@@ -92,8 +114,11 @@ class Deskinator:
 
         # State
         self.running = False
+        self.start_signal = False
+        self.finish_alerted = False
         self.edge_debounce_time = {}
         self.last_node_pose = (0.0, 0.0, 0.0)
+        self.sensor_context = {"sensors": [], "timestamp": time.time()}
 
         # Timers
         self.sense_timer = LoopTimer("Sense")
@@ -129,6 +154,58 @@ class Deskinator:
         print("[Calibrate] Calibrating IMU...")
         self.imu.bias_calibrate(duration=2.0)
         print("[Calibrate] IMU calibration complete")
+
+    def _notify_start_beep(self):
+        """Play start notification on buzzer."""
+        if not self.buzzer:
+            return
+
+        try:
+            self.buzzer.beep_pattern(count=3, duration=0.1, pause=0.1)
+        except Exception as e:
+            print(f"[Start] Buzzer error: {e}")
+
+    def _notify_finish_beep(self):
+        """Play finish notification on buzzer asynchronously."""
+        if not self.buzzer:
+            return
+
+        try:
+            self.buzzer.beep_async(count=2, duration=0.1, pause=0.1)
+        except Exception as e:
+            print(f"[Shutdown] Buzzer error: {e}")
+
+    def _await_gesture_start(self) -> bool:
+        """Block until a gesture is detected to start cleaning."""
+        self.start_signal = False
+        self.finish_alerted = False
+
+        if not self.gesture:
+            print("[Start] Gesture sensor unavailable; auto-starting")
+            self.start_signal = True
+            self._notify_start_beep()
+            return True
+
+        if getattr(self.gesture, "sim_mode", False):
+            print("[Start] Gesture sensor simulation mode; auto-starting")
+            self.start_signal = True
+            self._notify_start_beep()
+            return True
+
+        print("[Start] Waiting for gesture to begin cleaning (wave your hand)...")
+
+        try:
+            while True:
+                gesture = self.gesture.read_gesture()
+                if gesture != "none":
+                    print(f"[Start] Gesture detected: {gesture}")
+                    self.start_signal = True
+                    self._notify_start_beep()
+                    return True
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            print("\n[Start] Gesture wait cancelled by user")
+            return False
 
     async def loop_sense(self):
         """Sensing loop @ 50 Hz."""
@@ -301,7 +378,7 @@ class Deskinator:
             else:
                 # Update FSM
                 context = {
-                    "start_signal": True,  # Auto-start for now
+                    "start_signal": self.start_signal,  # Change to True for auto-start
                     "rectangle_confident": self.fsm.rectangle_confident,
                     "coverage_ratio": (
                         self.swept_map.coverage_ratio(self.rect_fit.get_rectangle())
@@ -390,6 +467,9 @@ class Deskinator:
 
             # Check if done
             if self.fsm.is_done():
+                if not self.finish_alerted:
+                    self._notify_finish_beep()
+                    self.finish_alerted = True
                 print("[Main] Mission complete!")
                 self.running = False
 
@@ -416,6 +496,10 @@ class Deskinator:
 
         print("[Main] Starting main loops...")
         print("  Press Ctrl+C to stop")
+
+        if not self._await_gesture_start():
+            self.shutdown()
+            return
 
         # Run async event loop
         asyncio.run(self.run_async())
@@ -451,6 +535,12 @@ class Deskinator:
         if self.visualizer:
             self.visualizer.save("output_map.png")
             self.visualizer.close()
+
+        # Cleanup peripherals
+        if self.buzzer:
+            self.buzzer.cleanup()
+        if self.gesture:
+            self.gesture.cleanup()
 
         # Cleanup GPIO
         gpio_manager.cleanup()
