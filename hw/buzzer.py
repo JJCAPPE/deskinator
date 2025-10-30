@@ -6,7 +6,12 @@ Provides simple beep patterns for signaling robot states.
 
 import time
 import threading
-from ..config import PINS
+
+try:  # Support both package and script execution
+    from ..config import PINS  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - fallback when run as script
+    from config import PINS
+
 from .gpio import gpio_manager
 
 

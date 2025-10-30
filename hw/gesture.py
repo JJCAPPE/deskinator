@@ -16,7 +16,10 @@ except ImportError:
     SMBUS_AVAILABLE = False
     print("Warning: smbus2 not available. Gesture sensor in simulation mode.")
 
-from ..config import PINS, I2C as I2C_CONFIG
+try:  # Support both package and script execution
+    from ..config import PINS, I2C as I2C_CONFIG  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - fallback when run as script
+    from config import PINS, I2C as I2C_CONFIG
 
 
 # APDS9960 Registers
