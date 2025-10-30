@@ -119,9 +119,17 @@ class Deskinator:
         self.running = False
         self.start_signal = False
         self.finish_alerted = False
-        self.edge_debounce_time = {}
+        self.edge_filters = [1.0 for _ in I2C.MUX_CHANS]
+        self.edge_drop_counts = {"left": 0, "right": 0}
+        self.edge_debounce_cycles = max(1, int(ALG.EDGE_DEBOUNCE * ALG.FUSE_HZ))
         self.last_node_pose = (0.0, 0.0, 0.0)
-        self.sensor_context = {"sensors": [], "timestamp": time.time()}
+        self.sensor_context = {
+            "sensors": [],
+            "filtered": list(self.edge_filters),
+            "timestamp": time.time(),
+        }
+        self.last_progress_time = time.time()
+        self.last_recovery_time = 0.0
 
         # Timers
         self.sense_timer = LoopTimer("Sense")
@@ -241,49 +249,76 @@ class Deskinator:
             self._check_edge_events(sensor_readings)
 
             # Store sensor context
-            self.sensor_context = {"sensors": sensor_readings, "timestamp": time.time()}
+            now = time.time()
+            self.sensor_context = {
+                "sensors": sensor_readings,
+                "filtered": list(self.edge_filters),
+                "timestamp": now,
+            }
 
             self.sense_timer.stop()
             rate.sleep()
 
     def _check_edge_events(self, sensors: List[float]):
         """Check for edge detection events."""
-        current_time = time.time()
+        if not sensors:
+            return
 
-        # Left pair
-        left_pair = [sensors[i] for i in I2C.LEFT_PAIR]
-        left_off = all(s <= ALG.EDGE_THRESH for s in left_pair)
+        if len(self.edge_filters) != len(sensors):
+            self.edge_filters = [1.0 for _ in sensors]
 
-        # Right pair
-        right_pair = [sensors[i] for i in I2C.RIGHT_PAIR]
-        right_off = all(s <= ALG.EDGE_THRESH for s in right_pair)
+        alpha = ALG.EDGE_EWMA_ALPHA
+        for i, reading in enumerate(sensors):
+            prev = self.edge_filters[i]
+            self.edge_filters[i] = alpha * reading + (1.0 - alpha) * prev
 
-        # Debounce
+        def pair_values(indices: tuple[int, int]):
+            filtered = []
+            raw = []
+            for idx in indices:
+                if idx < len(sensors):
+                    filtered.append(self.edge_filters[idx])
+                    raw.append(sensors[idx])
+            return filtered, raw
+
+        left_filtered, left_raw = pair_values(I2C.LEFT_PAIR)
+        right_filtered, right_raw = pair_values(I2C.RIGHT_PAIR)
+
+        def is_off(filtered: List[float], raw: List[float]) -> bool:
+            if not filtered or not raw:
+                return False
+            avg = sum(filtered) / len(filtered)
+            min_raw = min(raw)
+            return (
+                avg <= ALG.EDGE_THRESH
+                and min_raw <= ALG.EDGE_THRESH * ALG.EDGE_RAW_HYST
+            )
+
+        left_off = is_off(left_filtered, left_raw)
+        right_off = is_off(right_filtered, right_raw)
+
         if left_off:
-            if "left" not in self.edge_debounce_time:
-                self.edge_debounce_time["left"] = current_time
-            elif current_time - self.edge_debounce_time["left"] > ALG.EDGE_DEBOUNCE:
-                # Trigger edge event
-                if not self.motion.edge_event_active:
-                    print(f"[Edge] Left edge detected")
-                    self.motion.handle_edge_event("left")
-                    self._add_edge_points("left")
+            self.edge_drop_counts["left"] += 1
         else:
-            if "left" in self.edge_debounce_time:
-                del self.edge_debounce_time["left"]
+            self.edge_drop_counts["left"] = 0
 
         if right_off:
-            if "right" not in self.edge_debounce_time:
-                self.edge_debounce_time["right"] = current_time
-            elif current_time - self.edge_debounce_time["right"] > ALG.EDGE_DEBOUNCE:
-                # Trigger edge event
-                if not self.motion.edge_event_active:
-                    print(f"[Edge] Right edge detected")
-                    self.motion.handle_edge_event("right")
-                    self._add_edge_points("right")
+            self.edge_drop_counts["right"] += 1
         else:
-            if "right" in self.edge_debounce_time:
-                del self.edge_debounce_time["right"]
+            self.edge_drop_counts["right"] = 0
+
+        if not self.motion.edge_event_active:
+            if self.edge_drop_counts["left"] >= self.edge_debounce_cycles:
+                print(f"[Edge] Left edge detected")
+                self.edge_drop_counts["left"] = 0
+                self.motion.handle_edge_event("left")
+                self._add_edge_points("left")
+
+            if self.edge_drop_counts["right"] >= self.edge_debounce_cycles:
+                print(f"[Edge] Right edge detected")
+                self.edge_drop_counts["right"] = 0
+                self.motion.handle_edge_event("right")
+                self._add_edge_points("right")
 
     def _add_edge_points(self, side: str):
         """Add edge detection points to map."""
@@ -378,6 +413,8 @@ class Deskinator:
             # Handle edge events if active
             if self.motion.edge_event_active:
                 v_cmd, omega_cmd = self.motion.update_edge_event(pose, dt)
+            elif getattr(self.motion, "recovery_active", False):
+                v_cmd, omega_cmd = self.motion.update_recovery(pose, dt)
             else:
                 # Update FSM
                 context = {
@@ -413,8 +450,10 @@ class Deskinator:
                         # Check if lane complete
                         if self.motion.is_path_complete():
                             self.coverage_planner.advance_waypoint()
+                            self.motion.reset_path_progress()
                     else:
                         v_cmd, omega_cmd = 0.0, 0.0
+                        self.motion.reset_path_progress()
 
                 elif state == RobotState.DONE:
                     v_cmd, omega_cmd = 0.0, 0.0
@@ -429,18 +468,35 @@ class Deskinator:
             self.stepper.command(v_limited, omega_limited)
             self.stepper.update(dt)
 
+            now = time.time()
+
             # Update swept map (only for forward motion)
             if v_limited > 0:
                 ds = v_limited * dt
                 self.swept_map.add_forward_sweep(pose, ds)
+                self.last_progress_time = now
+            elif abs(omega_limited) > 0.4:
+                self.last_progress_time = now
+
+            if (
+                self.fsm.is_active()
+                and not self.motion.edge_event_active
+                and not getattr(self.motion, "recovery_active", False)
+                and now - self.last_progress_time > ALG.WATCHDOG_TIMEOUT
+                and now - self.last_recovery_time > ALG.WATCHDOG_COOLDOWN
+            ):
+                print("[Watchdog] Recovery maneuver triggered")
+                self.motion.start_watchdog_recovery()
+                self.last_recovery_time = now
 
             # Logging
             self.logger.log_telemetry(
-                time.time(),
+                now,
                 pose,
                 (v_limited, omega_limited),
                 self.sensor_context.get("sensors", []),
-                self.motion.edge_event_active,
+                self.motion.edge_event_active
+                or getattr(self.motion, "recovery_active", False),
                 self.fsm.get_state().name,
             )
 

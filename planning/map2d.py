@@ -55,31 +55,48 @@ class SweptMap:
         if not self.auto_expand:
             return
 
-        expanded = False
+        old_min_x, old_max_x = self.min_x, self.max_x
+        old_min_y, old_max_y = self.min_y, self.max_y
 
-        if x < self.min_x:
-            self.min_x = x - 1.0
-            expanded = True
-        if x > self.max_x:
-            self.max_x = x + 1.0
-            expanded = True
-        if y < self.min_y:
-            self.min_y = y - 1.0
-            expanded = True
-        if y > self.max_y:
-            self.max_y = y + 1.0
-            expanded = True
+        new_min_x, new_max_x = old_min_x, old_max_x
+        new_min_y, new_max_y = old_min_y, old_max_y
+
+        if x < new_min_x:
+            new_min_x = x - 1.0
+        if x > new_max_x:
+            new_max_x = x + 1.0
+        if y < new_min_y:
+            new_min_y = y - 1.0
+        if y > new_max_y:
+            new_max_y = y + 1.0
+
+        expanded = (
+            new_min_x != old_min_x
+            or new_max_x != old_max_x
+            or new_min_y != old_min_y
+            or new_max_y != old_max_y
+        )
 
         if expanded:
-            # Save old grid
             old_grid = self.grid.copy()
-            old_min_x, old_min_y = self.min_x, self.min_y
 
-            # Reinitialize with new bounds
+            # Update bounds and rebuild grid
+            self.min_x, self.max_x = new_min_x, new_max_x
+            self.min_y, self.max_y = new_min_y, new_max_y
             self._initialize_grid()
 
-            # Copy old data
-            # (Simplified: just clear and continue)
+            # Reproject previous coverage into new grid
+            for i in range(old_grid.shape[0]):
+                for j in range(old_grid.shape[1]):
+                    if old_grid[i, j] == 0:
+                        continue
+
+                    wx = old_min_x + j * self.resolution
+                    wy = old_min_y + i * self.resolution
+                    gi, gj = self._world_to_grid(wx, wy)
+
+                    if 0 <= gi < self.height and 0 <= gj < self.width:
+                        self.grid[gi, gj] = 1
 
     def add_forward_sweep(self, pose: Tuple[float, float, float], ds: float):
         """
@@ -204,3 +221,10 @@ class SweptMap:
     def get_grid(self) -> np.ndarray:
         """Get the coverage grid."""
         return self.grid.copy()
+
+    def is_swept(self, x: float, y: float) -> bool:
+        """Check if a world point has been marked as swept."""
+        gi, gj = self._world_to_grid(x, y)
+        if 0 <= gi < self.height and 0 <= gj < self.width:
+            return bool(self.grid[gi, gj])
+        return False

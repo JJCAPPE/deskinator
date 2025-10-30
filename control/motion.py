@@ -4,7 +4,7 @@ Motion controllers for boundary following and path following.
 
 import numpy as np
 from typing import List, Tuple, Optional
-from ..config import LIMS, ALG, GEOM
+from ..config import LIMS, ALG, GEOM, I2C
 from ..slam.frames import wrap_angle
 
 
@@ -20,7 +20,19 @@ class MotionController:
 
         # Path following state
         self.current_path = []
+        self.current_path_id = None
         self.current_waypoint_idx = 0
+
+        # Boundary discovery helper state
+        self.boundary_phase = 0.0
+        self._last_boundary_ts = None
+
+        # Watchdog recovery state
+        self.recovery_active = False
+        self.recovery_step = 0
+        self._recovery_start_pose: Optional[Tuple[float, float, float]] = None
+        self._recovery_start_heading = 0.0
+        self._recovery_turn_dir = 1
 
         # Pure pursuit parameters
         self.lookahead_dist = 0.15  # m
@@ -38,16 +50,50 @@ class MotionController:
         Returns:
             (v, ω) command
         """
-        # Simple strategy: move forward slowly, react to edges
-        v_target = 0.08  # Slow forward
-        omega_target = 0.0
+        sensors = edge_ctx.get("sensors", []) or [1.0] * len(I2C.MUX_CHANS)
+        timestamp = edge_ctx.get("timestamp")
 
-        # Check for warnings (single sensor)
-        sensors = edge_ctx.get("sensors", [0.0] * 4)
+        if timestamp is None:
+            dt = 1.0 / ALG.FUSE_HZ
+        else:
+            if self._last_boundary_ts is None:
+                dt = 1.0 / ALG.FUSE_HZ
+            else:
+                dt = max(0.0, timestamp - self._last_boundary_ts)
+            self._last_boundary_ts = timestamp
 
-        if min(sensors) < ALG.EDGE_THRESH * 1.5:
-            # Slow down near edge
-            v_target = 0.04
+        # Compute average readings by side
+        def _avg(indices: tuple[int, int]) -> float:
+            vals = [sensors[i] for i in indices if i < len(sensors)]
+            if not vals:
+                return 1.0
+            return float(np.mean(vals))
+
+        left_mean = _avg(I2C.LEFT_PAIR)
+        right_mean = _avg(I2C.RIGHT_PAIR)
+
+        # Normalized edge balance: positive when right edge is closer
+        balance = float(np.clip(left_mean - right_mean, -1.0, 1.0))
+
+        # Slow down as any sensor nears the edge threshold
+        proximity = min(left_mean, right_mean)
+        edge_intensity = np.clip(
+            (ALG.EDGE_THRESH - proximity) / ALG.EDGE_THRESH, 0.0, 1.0
+        )
+
+        v_target = ALG.BOUNDARY_SPEED * (1.0 - 0.5 * edge_intensity)
+        v_target = float(np.clip(v_target, ALG.BOUNDARY_MIN_SPEED, ALG.BOUNDARY_SPEED))
+
+        # Update slow oscillation phase for gentle wall search
+        self.boundary_phase = (self.boundary_phase + ALG.BOUNDARY_SWAY_RATE * dt) % (
+            2 * np.pi
+        )
+
+        sway = ALG.BOUNDARY_SWAY_GAIN * np.sin(self.boundary_phase)
+        omega_target = ALG.BOUNDARY_EDGE_GAIN * balance + sway
+        omega_target = float(
+            np.clip(omega_target, -LIMS.OMEGA_MAX * 0.5, LIMS.OMEGA_MAX * 0.5)
+        )
 
         return (v_target, omega_target)
 
@@ -68,13 +114,37 @@ class MotionController:
         Returns:
             (v, ω) command
         """
-        if not path or self.current_waypoint_idx >= len(path):
+        self.set_path(path)
+
+        if not self.current_path:
+            return (0.0, 0.0)
+
+        if self.current_waypoint_idx >= len(self.current_path):
             return (0.0, 0.0)
 
         x, y, theta = ekf_pose
 
+        # Estimate how much of the upcoming path is still unswept
+        fresh_ratio = 1.0
+        if swept_map is not None and hasattr(swept_map, "is_swept"):
+            samples = 0
+            fresh = 0
+            sample_end = min(len(self.current_path), self.current_waypoint_idx + 12)
+            for idx in range(self.current_waypoint_idx, sample_end):
+                px, py = self.current_path[idx]
+                samples += 1
+                if not swept_map.is_swept(px, py):
+                    fresh += 1
+            if samples > 0:
+                fresh_ratio = fresh / samples
+
+        lookahead_scale = np.clip(0.8 + 0.5 * (1.0 - fresh_ratio), 0.6, 1.4)
+        dynamic_lookahead = self.lookahead_dist * lookahead_scale
+
         # Find lookahead point
-        lookahead_point = self._find_lookahead_point(x, y, path)
+        lookahead_point = self._find_lookahead_point(
+            x, y, self.current_path, dynamic_lookahead
+        )
 
         if lookahead_point is None:
             # Reached end of path
@@ -86,8 +156,9 @@ class MotionController:
         target_heading = np.arctan2(dy, dx)
         heading_error = wrap_angle(target_heading - theta)
 
-        # Pure pursuit control
-        v_target = LIMS.V_MAX * 0.6  # 60% of max speed
+        # Pure pursuit control with coverage-aware speed scaling
+        v_scale = np.clip(0.6 + 0.4 * (1.0 - fresh_ratio), 0.4, 1.0)
+        v_target = LIMS.V_MAX * v_scale
 
         # Curvature (simplified pure pursuit)
         L = np.sqrt(dx * dx + dy * dy)
@@ -106,12 +177,20 @@ class MotionController:
         return (v_target, omega_target)
 
     def _find_lookahead_point(
-        self, x: float, y: float, path: List[Tuple[float, float]]
+        self,
+        x: float,
+        y: float,
+        path: List[Tuple[float, float]],
+        lookahead_dist: Optional[float] = None,
     ) -> Optional[Tuple[float, float]]:
         """Find lookahead point on path."""
         # Find closest point on path
         min_dist = float("inf")
         closest_idx = self.current_waypoint_idx
+
+        target_dist = (
+            lookahead_dist if lookahead_dist is not None else self.lookahead_dist
+        )
 
         for i in range(self.current_waypoint_idx, len(path)):
             px, py = path[i]
@@ -124,7 +203,7 @@ class MotionController:
         for i in range(closest_idx, len(path)):
             px, py = path[i]
             dist = np.sqrt((px - x) ** 2 + (py - y) ** 2)
-            if dist >= self.lookahead_dist:
+            if dist >= target_dist:
                 self.current_waypoint_idx = i
                 return (px, py)
 
@@ -219,9 +298,98 @@ class MotionController:
 
     def set_path(self, path: List[Tuple[float, float]]):
         """Set current path for following."""
-        self.current_path = path
-        self.current_waypoint_idx = 0
+        if not path:
+            self.current_path = []
+            self.current_path_id = None
+            self.current_waypoint_idx = 0
+            return
+
+        path_id = id(path)
+        if self.current_path_id != path_id:
+            self.current_path = path
+            self.current_path_id = path_id
+            self.current_waypoint_idx = 0
 
     def is_path_complete(self) -> bool:
         """Check if current path is complete."""
+        if not self.current_path:
+            return False
         return self.current_waypoint_idx >= len(self.current_path) - 1
+
+    def reset_path_progress(self):
+        """Reset tracking so a new lane can be assigned."""
+        self.current_path = []
+        self.current_path_id = None
+        self.current_waypoint_idx = 0
+
+    def start_watchdog_recovery(self):
+        """Initiate a watchdog recovery maneuver."""
+        if self.edge_event_active:
+            # Edge handling takes precedence
+            return
+
+        self.recovery_active = True
+        self.recovery_step = 0
+        self._recovery_start_pose = None
+        self._recovery_turn_dir *= -1
+        if self._recovery_turn_dir == 0:
+            self._recovery_turn_dir = 1
+
+    def update_recovery(
+        self, ekf_pose: Tuple[float, float, float], dt: float
+    ) -> Tuple[float, float]:
+        """State machine for watchdog recovery."""
+        if not self.recovery_active:
+            return (0.0, 0.0)
+
+        x, y, theta = ekf_pose
+
+        if self.recovery_step == 0:
+            self.recovery_step = 1
+            self._recovery_start_pose = ekf_pose
+            return (-LIMS.V_REV_MAX * 0.8, 0.0)
+
+        if self.recovery_step == 1:
+            if self._recovery_start_pose is None:
+                self._recovery_start_pose = ekf_pose
+                return (-LIMS.V_REV_MAX * 0.8, 0.0)
+            dist = np.sqrt(
+                (x - self._recovery_start_pose[0]) ** 2
+                + (y - self._recovery_start_pose[1]) ** 2
+            )
+            if dist >= ALG.RECOVERY_BACKOFF:
+                self.recovery_step = 2
+                self._recovery_start_heading = theta
+                return (0.0, 0.0)
+            return (-LIMS.V_REV_MAX * 0.8, 0.0)
+
+        if self.recovery_step == 2:
+            target_angle = self._recovery_turn_dir * ALG.RECOVERY_TURN_ANGLE
+            heading_diff = wrap_angle(theta - self._recovery_start_heading)
+            remaining = target_angle - heading_diff
+            if abs(remaining) < 0.05:
+                self.recovery_step = 3
+                self._recovery_start_pose = ekf_pose
+                return (0.0, 0.0)
+            omega_dir = np.sign(remaining) if remaining != 0 else np.sign(target_angle)
+            return (0.0, omega_dir * LIMS.OMEGA_MAX * 0.3)
+
+        if self.recovery_step == 3:
+            if self._recovery_start_pose is None:
+                self._recovery_start_pose = ekf_pose
+                return (LIMS.V_MAX * 0.25, 0.0)
+            dist = np.sqrt(
+                (x - self._recovery_start_pose[0]) ** 2
+                + (y - self._recovery_start_pose[1]) ** 2
+            )
+            if dist >= ALG.RECOVERY_BACKOFF:
+                self.recovery_active = False
+                self.recovery_step = 0
+                self._recovery_start_pose = None
+                return (0.0, 0.0)
+            return (LIMS.V_MAX * 0.25, 0.0)
+
+        self.recovery_active = False
+        self.recovery_step = 0
+        self._recovery_start_pose = None
+        return (0.0, 0.0)

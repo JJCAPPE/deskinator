@@ -71,6 +71,8 @@ class Algo:
     FUSE_HZ: int = 50  # EKF update rate
     EDGE_THRESH: float = 0.5  # APDS off-table threshold (norm.)
     EDGE_DEBOUNCE: float = 0.06  # s
+    EDGE_EWMA_ALPHA: float = 0.35  # smoothing factor for proximity filtering
+    EDGE_RAW_HYST: float = 1.15  # multiplier for raw readings hysteresis
     NODE_SPACING: float = 0.05  # m
     LOOP_RADIUS: float = 0.06  # m
     SWEEP_OVERLAP: float = 0.02  # m
@@ -80,6 +82,15 @@ class Algo:
     STOP_DELAY_AFTER_EDGE: float = 0.00  # s
     POST_EDGE_BACKOFF: float = 0.03  # m
     POST_EDGE_SIDE_STEP: float = 0.05  # m
+    BOUNDARY_SPEED: float = 0.10  # m/s baseline during boundary sweep
+    BOUNDARY_MIN_SPEED: float = 0.04  # m/s minimum crawl near edge
+    BOUNDARY_EDGE_GAIN: float = 2.2  # rad/s per normalized edge delta
+    BOUNDARY_SWAY_GAIN: float = 0.35  # rad/s sinusoidal dither gain
+    BOUNDARY_SWAY_RATE: float = 0.7  # Hz equivalent angular rate for dither
+    WATCHDOG_TIMEOUT: float = 0.6  # s without progress before recovery
+    WATCHDOG_COOLDOWN: float = 2.0  # s between recovery attempts
+    RECOVERY_BACKOFF: float = 0.04  # m reverse distance during recovery
+    RECOVERY_TURN_ANGLE: float = 0.5  # rad turn away during recovery
 
 
 PINS = Pins()

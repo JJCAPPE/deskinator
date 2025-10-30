@@ -54,28 +54,31 @@ class CoveragePlanner:
             return []
 
         # Determine lane orientation (along long axis)
+        lane_spacing = GEOM.VAC_WIDTH - ALG.SWEEP_OVERLAP
+
         if width > height:
             # Lanes run along width
             lane_length = width_inset
-            lane_spacing = GEOM.VAC_WIDTH - ALG.SWEEP_OVERLAP
-            n_lanes = int(height_inset / lane_spacing) + 1
+            perp_extent = height_inset
             perpendicular = True
         else:
             # Lanes run along height
             lane_length = height_inset
-            lane_spacing = GEOM.VAC_WIDTH - ALG.SWEEP_OVERLAP
-            n_lanes = int(width_inset / lane_spacing) + 1
+            perp_extent = width_inset
             perpendicular = False
+
+        n_lanes = max(1, int(perp_extent / lane_spacing) + 1)
+        half_extent = 0.5 * perp_extent
 
         # Generate lanes in rectangle frame
         lanes_local = []
 
+        center_index = 0.5 * (n_lanes - 1)
+
         for i in range(n_lanes):
-            # Offset perpendicular to lane direction
-            offset = (
-                -0.5 * (width_inset if not perpendicular else height_inset)
-                + i * lane_spacing
-            )
+            # Offset perpendicular to lane direction (centered)
+            raw_offset = (i - center_index) * lane_spacing
+            offset = float(np.clip(raw_offset, -half_extent, half_extent))
 
             if perpendicular:
                 # Lane runs along width (x direction)
