@@ -6,7 +6,7 @@ This script scans the I2C bus to find all connected devices and helps
 you determine the correct addresses for config.py.
 
 Run this after wiring your I2C devices to find:
-- BNO085 IMU address
+- MPU-6050 IMU address
 - TCA9548A multiplexer address (should be 0x70)
 - APDS9960 proximity sensors through each MUX channel
 """
@@ -59,9 +59,8 @@ def identify_device(addr: int) -> tuple[str, str]:
         (device_name, note)
     """
     common_devices = {
-        0x29: ("BNO085 IMU", "Alternate address"),
-        0x4A: ("BNO085 IMU", "Default address if SA0 high"),
-        0x4B: ("BNO085 IMU", "Default address if SA0 low"),
+        0x68: ("MPU-6050 IMU", "Default address"),
+        0x69: ("MPU-6050 IMU", "AD0 pulled high"),
         0x39: ("APDS9960", "Proximity/Gesture sensor"),
         0x70: ("TCA9548A", "I2C Multiplexer"),
         0x71: ("TCA9548A", "I2C Multiplexer - Alt addr"),
@@ -181,7 +180,7 @@ def generate_config_suggestions(
     if imu_candidates:
         imu_addr = imu_candidates[0]
         print(
-            f"{Colors.GREEN}ADDR_IMU: int = 0x{imu_addr:02X}{Colors.END}  # BNO085 detected"
+            f"{Colors.GREEN}ADDR_IMU: int = 0x{imu_addr:02X}{Colors.END}  # MPU-6050 detected"
         )
         if len(imu_candidates) > 1:
             print(
@@ -222,7 +221,7 @@ def generate_config_suggestions(
     # Summary
     print(f"\n{Colors.BOLD}Summary:{Colors.END}")
     print(
-        f"  IMU (BNO085):        {Colors.GREEN if imu_candidates else Colors.RED}{'✓ Found' if imu_candidates else '✗ Not found'}{Colors.END}"
+        f"  IMU (MPU-6050):     {Colors.GREEN if imu_candidates else Colors.RED}{'✓ Found' if imu_candidates else '✗ Not found'}{Colors.END}"
     )
     print(
         f"  Multiplexer (TCA):   {Colors.GREEN if mux_addr else Colors.RED}{'✓ Found' if mux_addr else '✗ Not found'}{Colors.END}"
@@ -243,8 +242,8 @@ def generate_config_suggestions(
     # Warnings
     if not imu_candidates:
         print(f"\n{Colors.YELLOW}⚠ Warning: No IMU detected{Colors.END}")
-        print("  - Check BNO085 wiring (SDA, SCL, VCC, GND)")
-        print("  - BNO085 may need reset pin pulled high")
+        print("  - Check MPU-6050 wiring (SDA, SCL, VCC, GND, AD0)")
+        print("  - Ensure MPU-6050 has 3.3V power and common ground")
         print("  - Expected addresses: 0x4A or 0x4B")
 
     if not mux_addr:

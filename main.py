@@ -19,7 +19,7 @@ from .hw.gesture import GestureSensor
 from .hw.i2c import I2CBus
 from .hw.tca9548a import TCA9548A
 from .hw.apds9960 import APDS9960
-from .hw.bno085 import BNO085
+from .hw.mpu6050 import MPU6050
 from .slam.ekf import EKF
 from .slam.posegraph import PoseGraph
 from .slam.rect_fit import RectangleFit
@@ -89,8 +89,11 @@ class Deskinator:
         self.mux.select(None)
 
         # IMU
-        self.imu = BNO085(self.i2c, I2C.ADDR_IMU)
-        print(f"  BNO085 IMU initialized")
+        self.imu = MPU6050(self.i2c, I2C.ADDR_IMU or 0x68)
+        if getattr(self.imu, "sim_mode", False):
+            print("  MPU-6050 IMU in simulation mode")
+        else:
+            print("  MPU-6050 IMU initialized")
 
         # State estimation
         print("[Init] Initializing SLAM...")

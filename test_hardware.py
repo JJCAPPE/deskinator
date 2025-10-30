@@ -6,7 +6,7 @@ Tests all sensors and actuators to verify wiring:
 - I2C bus and device detection
 - TCA9548A I2C multiplexer
 - 4x APDS9960 proximity sensors (through multiplexer)
-- BNO085 IMU
+- MPU-6050 IMU
 - Left and right stepper motors
 - Vacuum motor PWM
 
@@ -22,7 +22,7 @@ from hw.i2c import I2CBus
 from hw.gpio import gpio_manager
 from hw.tca9548a import TCA9548A
 from hw.apds9960 import APDS9960
-from hw.bno085 import BNO085
+from hw.mpu6050 import MPU6050
 from hw.stepper import StepperDrive
 from hw.vacuum import Vacuum
 from hw.buzzer import Buzzer
@@ -102,7 +102,7 @@ def test_i2c_bus() -> Tuple[bool, I2CBus]:
             print_warn(f"TCA9548A not found at expected address 0x{expected_mux:02X}")
 
         if I2C_CONFIG.ADDR_IMU and I2C_CONFIG.ADDR_IMU in devices:
-            print_info(f"✓ BNO085 IMU detected at 0x{I2C_CONFIG.ADDR_IMU:02X}")
+            print_info(f"✓ MPU-6050 IMU detected at 0x{I2C_CONFIG.ADDR_IMU:02X}")
 
         return True, bus
     except Exception as e:
@@ -201,12 +201,12 @@ def test_proximity_sensors(bus: I2CBus, mux: TCA9548A) -> bool:
 
 
 def test_imu(bus: I2CBus) -> bool:
-    """Test BNO085 IMU."""
-    print_header("BNO085 IMU TEST")
+    """Test MPU-6050 IMU."""
+    print_header("MPU-6050 IMU TEST")
 
-    print_test("Initializing BNO085")
+    print_test("Initializing MPU-6050")
     try:
-        imu = BNO085(bus, I2C_CONFIG.ADDR_IMU)
+        imu = MPU6050(bus, I2C_CONFIG.ADDR_IMU)
         print_pass()
     except Exception as e:
         print_fail(f"Error: {e}")
@@ -532,7 +532,7 @@ def main():
 
     # Test IMU
     imu_ok = test_imu(bus)
-    results["BNO085 IMU"] = imu_ok
+    results["MPU-6050 IMU"] = imu_ok
 
     # Test stepper motors
     stepper_ok = test_stepper_motors()

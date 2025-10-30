@@ -28,7 +28,7 @@ class I2CParams:
 
     BUS: int = 1  # Main I2C bus for sensors/IMU
     GESTURE_BUS: int = 3  # I2C bus for gesture sensor (or use software I2C)
-    ADDR_IMU: int | None = None  # set via i2cdetect
+    ADDR_IMU: int | None = 0x68  # MPU-6050 default address
     ADDR_MUX: int = 0x70  # TCA9548A default
     APDS_ADDR: int = 0x39  # APDS9960 default
     GESTURE_ADDR: int = 0x39  # Gesture APDS9960 (on separate bus)
