@@ -203,20 +203,22 @@ class Deskinator:
             self._notify_start_beep()
             return True
 
-        print("[Start] Waiting for gesture to begin cleaning (wave your hand)...")
+        print("[Start] Hold your hand near the gesture sensor to begin...")
 
         try:
-            while True:
-                gesture = self.gesture.read_gesture()
-                if gesture != "none":
-                    print(f"[Start] Gesture detected: {gesture}")
-                    self.start_signal = True
-                    self._notify_start_beep()
-                    return True
-                time.sleep(0.1)
+            triggered = self.gesture.wait_for_hand_presence(timeout=None)
         except KeyboardInterrupt:
             print("\n[Start] Gesture wait cancelled by user")
             return False
+
+        if triggered:
+            print("[Start] Proximity trigger detected")
+            self.start_signal = True
+            self._notify_start_beep()
+            return True
+
+        print("[Start] Gesture sensor did not trigger")
+        return False
 
     async def loop_sense(self):
         """Sensing loop @ 50 Hz."""
@@ -418,7 +420,7 @@ class Deskinator:
             else:
                 # Update FSM
                 context = {
-                    "start_signal": self.start_signal,  # Change to True for auto-start
+                    "start_signal": True,  # Change to self.start_signal
                     "rectangle_confident": self.fsm.rectangle_confident,
                     "coverage_ratio": (
                         self.swept_map.coverage_ratio(self.rect_fit.get_rectangle())

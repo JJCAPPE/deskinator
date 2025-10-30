@@ -427,38 +427,40 @@ def test_gesture_sensor() -> bool:
         return False
 
     print("\n" + Colors.BOLD + "Gesture Detection Test:" + Colors.END)
-    print_info("Wave your hand over the sensor to test gesture detection")
-    print_info("Testing for 10 seconds - try UP, DOWN, LEFT, RIGHT gestures\n")
+    print_info("Hold your hand near the sensor to trigger start")
+    print_info("Testing for 10 seconds - move hand in and out a few times\n")
 
-    gesture_counts = {"up": 0, "down": 0, "left": 0, "right": 0}
+    trigger_count = 0
+    hand_active = False
 
     try:
         start_time = time.time()
-        last_gesture = "none"
 
         while time.time() - start_time < 10.0:
-            detected = gesture.read_gesture()
-            if detected != "none" and detected != last_gesture:
-                gesture_counts[detected] += 1
+            present = gesture.is_hand_present()
+            raw = gesture.last_proximity_raw
+
+            if present and not hand_active:
+                trigger_count += 1
                 print(
-                    f"  {Colors.GREEN}✓{Colors.END} Gesture detected: {Colors.BOLD}{detected.upper()}{Colors.END}"
+                    f"  {Colors.GREEN}✓{Colors.END} Proximity trigger detected (raw={raw})"
                 )
-                last_gesture = detected
-                time.sleep(0.5)  # Debounce
+                hand_active = True
+            elif not present and hand_active:
+                print("  Hand removed")
+                hand_active = False
+
             time.sleep(0.05)
 
         print()
-        if sum(gesture_counts.values()) > 0:
-            print_pass("Gestures detected:")
-            for direction, count in gesture_counts.items():
-                if count > 0:
-                    print(f"    {direction.upper()}: {count}x")
+        if trigger_count > 0:
+            print_pass(f"Proximity triggers detected: {trigger_count}x")
         else:
-            print_warn("No gestures detected - wave hand over sensor")
+            print_warn("No proximity trigger detected - move hand closer to sensor")
 
         print("\n" + Colors.YELLOW + "NOTE:" + Colors.END + " Gesture sensor usage:")
-        print("  - Wave UP or RIGHT to start cleaning")
-        print("  - Wave DOWN or LEFT to stop/cancel")
+        print("  - Any hand presence starts cleaning")
+        print("  - No cancel gesture; use hardware stop or UI to end")
         print("  - Requires software I2C on GPIO17/GPIO4")
         print("  - See HARDWARE_SETUP.md for I2C configuration\n")
 
