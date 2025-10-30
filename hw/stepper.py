@@ -8,7 +8,12 @@ and provides odometry feedback.
 import time
 import threading
 import numpy as np
-from ..config import PINS, GEOM, LIMS
+
+try:  # Support both package and script execution
+    from ..config import PINS, GEOM, LIMS  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - fallback when run as script
+    from config import PINS, GEOM, LIMS
+
 from .gpio import gpio_manager
 
 
