@@ -28,10 +28,10 @@ class I2CParams:
 
     BUS: int = 1  # Main I2C bus for sensors/IMU
     GESTURE_BUS: int = 3  # I2C bus for gesture sensor (or use software I2C)
-    ADDR_IMU: int | None = 0x68  # MPU-6050 (AD0 low)
+    ADDR_IMU: int | None = 0x68  # MPU-6050 (AD0 low) #TODO Still have to wire up the IMU
     ADDR_MUX: int = 0x70  # TCA9548A detected
     APDS_ADDR: int = 0x39  # APDS9960 default
-    GESTURE_ADDR: int = 0x39  # Gesture APDS9960 (on separate bus)
+    GESTURE_ADDR: int = 0x29  # Gesture APDS9960 (on separate bus)
     MUX_CHANS: tuple[int, int, int, int] = (
         0,
         1,
