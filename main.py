@@ -579,6 +579,7 @@ class Deskinator:
         # Stop motors
         self.stepper.stop()
         self.stepper.stop_pulse_generation()
+        self.stepper.disable_drivers()
 
         # Stop vacuum
         self.vacuum.off()

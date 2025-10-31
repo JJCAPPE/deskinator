@@ -20,11 +20,16 @@ from .gpio import gpio_manager
 class StepperDrive:
     """Differential drive stepper motor controller."""
 
+    _PULSE_WIDTH_S = 2.0e-5  # 20 microseconds high time per STEP pulse
+    _LOOP_SLEEP_S = 1.0e-4  # 100 microseconds background loop sleep
+
     def __init__(self):
         self.left_step_pin = PINS.LEFT_STEP
         self.left_dir_pin = PINS.LEFT_DIR
         self.right_step_pin = PINS.RIGHT_STEP
         self.right_dir_pin = PINS.RIGHT_DIR
+        self.left_enable_pin = getattr(PINS, "LEFT_ENABLE", None)
+        self.right_enable_pin = getattr(PINS, "RIGHT_ENABLE", None)
 
         # Velocity state
         self.v_cmd = 0.0  # commanded linear velocity (m/s)
@@ -44,13 +49,19 @@ class StepperDrive:
         self.running = False
         self.pulse_thread = None
         self.lock = threading.Lock()
-
         # Setup GPIO
         gpio_manager.setup()
         gpio_manager.setup_output(self.left_step_pin, 0)
         gpio_manager.setup_output(self.left_dir_pin, 0)
         gpio_manager.setup_output(self.right_step_pin, 0)
         gpio_manager.setup_output(self.right_dir_pin, 0)
+        if self.left_enable_pin is not None:
+            gpio_manager.setup_output(self.left_enable_pin, 1)
+        if self.right_enable_pin is not None:
+            gpio_manager.setup_output(self.right_enable_pin, 1)
+
+        # Start background pulse generation immediately so commands take effect
+        self.start_pulse_generation()
 
     def command(self, v: float, omega: float):
         """Set velocity command (m/s, rad/s)."""
@@ -132,6 +143,7 @@ class StepperDrive:
         if self.running:
             return
 
+        self.enable_drivers()
         self.running = True
         self.pulse_thread = threading.Thread(target=self._pulse_loop, daemon=True)
         self.pulse_thread.start()
@@ -144,18 +156,43 @@ class StepperDrive:
 
     def _pulse_loop(self):
         """Background loop for generating step pulses."""
-        # Simplified pulse generation - in production use hardware PWM
-        dt_pulse = 0.00005  # 50 us per pulse minimum
+        next_left = time.perf_counter()
+        next_right = next_left
 
         while self.running:
             with self.lock:
-                # Calculate required pulse rates
-                rate_L = abs(self.vL_current) * GEOM.STEPS_PER_M
-                rate_R = abs(self.vR_current) * GEOM.STEPS_PER_M
+                vL = self.vL_current
+                vR = self.vR_current
 
-            # Generate pulses (simplified - just sleep)
-            # Real implementation would use hardware timers or DMA
-            time.sleep(dt_pulse)
+            rate_L = abs(vL) * GEOM.STEPS_PER_M
+            rate_R = abs(vR) * GEOM.STEPS_PER_M
+
+            now = time.perf_counter()
+
+            if rate_L > 0.0:
+                period_L = max(1.0 / rate_L, self._PULSE_WIDTH_S * 2.0)
+                while now >= next_left and self.running:
+                    self._emit_step_pulse(self.left_step_pin)
+                    next_left += period_L
+                    if next_left - now > period_L:
+                        break
+                    now = time.perf_counter()
+            else:
+                next_left = now
+
+            now = time.perf_counter()
+            if rate_R > 0.0:
+                period_R = max(1.0 / rate_R, self._PULSE_WIDTH_S * 2.0)
+                while now >= next_right and self.running:
+                    self._emit_step_pulse(self.right_step_pin)
+                    next_right += period_R
+                    if next_right - now > period_R:
+                        break
+                    now = time.perf_counter()
+            else:
+                next_right = now
+
+            time.sleep(self._LOOP_SLEEP_S)
 
     def stop(self):
         """Emergency stop - zero all velocities."""
@@ -163,3 +200,25 @@ class StepperDrive:
         with self.lock:
             self.vL_current = 0.0
             self.vR_current = 0.0
+
+    def _emit_step_pulse(self, pin: int):
+        """Toggle the given step pin high/low with the configured pulse width."""
+        gpio_manager.output(pin, 1)
+        end_time = time.perf_counter() + self._PULSE_WIDTH_S
+        while time.perf_counter() < end_time:
+            pass
+        gpio_manager.output(pin, 0)
+
+    def enable_drivers(self):
+        """Assert enable lines (active low) to energize both drivers."""
+        if self.left_enable_pin is not None:
+            gpio_manager.output(self.left_enable_pin, 0)
+        if self.right_enable_pin is not None:
+            gpio_manager.output(self.right_enable_pin, 0)
+
+    def disable_drivers(self):
+        """De-assert enable lines (active low) to release both drivers."""
+        if self.left_enable_pin is not None:
+            gpio_manager.output(self.left_enable_pin, 1)
+        if self.right_enable_pin is not None:
+            gpio_manager.output(self.right_enable_pin, 1)
