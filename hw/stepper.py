@@ -1,35 +1,73 @@
 """
-Stepper motor driver for TMC2209 via STEP/DIR control.
+Stepper motor driver using the Adafruit DC & Stepper Motor HAT (MotorKit API).
 
-Converts velocity commands to wheel velocities, generates step pulses,
+Converts velocity commands to wheel velocities, schedules stepper moves,
 and provides odometry feedback.
 """
 
-import time
+from __future__ import annotations
+
 import threading
+import time
+from importlib import import_module
+from typing import Optional
+
 import numpy as np
 
 try:  # Support both package and script execution
-    from ..config import PINS, GEOM, LIMS  # type: ignore[import-not-found]
+    from ..config import GEOM, LIMS  # type: ignore[import-not-found]
 except ImportError:  # pragma: no cover - fallback when run as script
-    from config import PINS, GEOM, LIMS
-
-from .gpio import gpio_manager
+    from config import GEOM, LIMS
 
 
 class StepperDrive:
     """Differential drive stepper motor controller."""
 
-    _PULSE_WIDTH_S = 2.0e-5  # 20 microseconds high time per STEP pulse
+    _MIN_STEP_PERIOD_S = 4.0e-5  # minimum time between steps (40 µs)
     _LOOP_SLEEP_S = 1.0e-4  # 100 microseconds background loop sleep
 
-    def __init__(self):
-        self.left_step_pin = PINS.LEFT_STEP
-        self.left_dir_pin = PINS.LEFT_DIR
-        self.right_step_pin = PINS.RIGHT_STEP
-        self.right_dir_pin = PINS.RIGHT_DIR
-        self.left_enable_pin = getattr(PINS, "LEFT_ENABLE", None)
-        self.right_enable_pin = getattr(PINS, "RIGHT_ENABLE", None)
+    def __init__(
+        self,
+        kit: Optional[object] = None,
+        *,
+        step_style: Optional[int] = None,
+        release_on_idle: bool = False,
+    ):
+        try:
+            stepper_module = import_module("adafruit_motor.stepper")
+        except ImportError as exc:  # pragma: no cover - hardware dependency
+            raise ImportError(
+                "Adafruit MotorKit library is required. Install with "
+                "'pip3 install adafruit-circuitpython-motorkit'."
+            ) from exc
+
+        if kit is None:
+            try:
+                motorhat_module = import_module("adafruit_motorkit")
+            except ImportError as exc:  # pragma: no cover - hardware dependency
+                raise ImportError(
+                    "Adafruit MotorKit library is required. Install with "
+                    "'pip3 install adafruit-circuitpython-motorkit'."
+                ) from exc
+            self.kit = motorhat_module.MotorKit()
+        else:
+            self.kit = kit
+
+        self.left_stepper = getattr(self.kit, "stepper1", None)
+        self.right_stepper = getattr(self.kit, "stepper2", None)
+        if self.left_stepper is None or self.right_stepper is None:
+            raise RuntimeError(
+                "MotorKit did not report both stepper1 and stepper2. "
+                "Ensure the DC & Stepper Motor HAT is connected."
+            )
+
+        self._stepper_module = stepper_module
+        self.step_style = (
+            step_style if step_style is not None else self._stepper_module.INTERLEAVE
+        )
+        self.release_on_idle = release_on_idle
+        self._left_engaged = False
+        self._right_engaged = False
 
         # Velocity state
         self.v_cmd = 0.0  # commanded linear velocity (m/s)
@@ -45,20 +83,10 @@ class StepperDrive:
         self.last_steps_left = 0
         self.last_steps_right = 0
 
-        # Pulse generation
+        # Motion scheduling
         self.running = False
         self.pulse_thread = None
         self.lock = threading.Lock()
-        # Setup GPIO
-        gpio_manager.setup()
-        gpio_manager.setup_output(self.left_step_pin, 0)
-        gpio_manager.setup_output(self.left_dir_pin, 0)
-        gpio_manager.setup_output(self.right_step_pin, 0)
-        gpio_manager.setup_output(self.right_dir_pin, 0)
-        if self.left_enable_pin is not None:
-            gpio_manager.setup_output(self.left_enable_pin, 1)
-        if self.right_enable_pin is not None:
-            gpio_manager.setup_output(self.right_enable_pin, 1)
 
         # Start background pulse generation immediately so commands take effect
         self.start_pulse_generation()
@@ -96,10 +124,6 @@ class StepperDrive:
 
             self.vL_current += dv_left
             self.vR_current += dv_right
-
-            # Set direction pins
-            gpio_manager.output(self.left_dir_pin, 1 if self.vL_current >= 0 else 0)
-            gpio_manager.output(self.right_dir_pin, 1 if self.vR_current >= 0 else 0)
 
             # Calculate distances
             dSL = self.vL_current * dt
@@ -139,7 +163,7 @@ class StepperDrive:
             return dSL, dSR
 
     def start_pulse_generation(self):
-        """Start background thread for step pulse generation."""
+        """Start background thread for step scheduling."""
         if self.running:
             return
 
@@ -155,7 +179,7 @@ class StepperDrive:
             self.pulse_thread.join(timeout=1.0)
 
     def _pulse_loop(self):
-        """Background loop for generating step pulses."""
+        """Background loop for scheduling stepper moves via MotorKit."""
         next_left = time.perf_counter()
         next_right = next_left
 
@@ -170,27 +194,49 @@ class StepperDrive:
             now = time.perf_counter()
 
             if rate_L > 0.0:
-                period_L = max(1.0 / rate_L, self._PULSE_WIDTH_S * 2.0)
+                period_L = max(1.0 / rate_L, self._MIN_STEP_PERIOD_S)
+                direction_L = (
+                    self._stepper_module.FORWARD
+                    if vL >= 0
+                    else self._stepper_module.BACKWARD
+                )
                 while now >= next_left and self.running:
-                    self._emit_step_pulse(self.left_step_pin)
+                    self.left_stepper.onestep(
+                        direction=direction_L, style=self.step_style
+                    )
+                    self._left_engaged = True
                     next_left += period_L
                     if next_left - now > period_L:
                         break
                     now = time.perf_counter()
             else:
                 next_left = now
+                if self.release_on_idle and self._left_engaged:
+                    self.left_stepper.release()
+                    self._left_engaged = False
 
             now = time.perf_counter()
             if rate_R > 0.0:
-                period_R = max(1.0 / rate_R, self._PULSE_WIDTH_S * 2.0)
+                period_R = max(1.0 / rate_R, self._MIN_STEP_PERIOD_S)
+                direction_R = (
+                    self._stepper_module.FORWARD
+                    if vR >= 0
+                    else self._stepper_module.BACKWARD
+                )
                 while now >= next_right and self.running:
-                    self._emit_step_pulse(self.right_step_pin)
+                    self.right_stepper.onestep(
+                        direction=direction_R, style=self.step_style
+                    )
+                    self._right_engaged = True
                     next_right += period_R
                     if next_right - now > period_R:
                         break
                     now = time.perf_counter()
             else:
                 next_right = now
+                if self.release_on_idle and self._right_engaged:
+                    self.right_stepper.release()
+                    self._right_engaged = False
 
             time.sleep(self._LOOP_SLEEP_S)
 
@@ -200,25 +246,18 @@ class StepperDrive:
         with self.lock:
             self.vL_current = 0.0
             self.vR_current = 0.0
-
-    def _emit_step_pulse(self, pin: int):
-        """Toggle the given step pin high/low with the configured pulse width."""
-        gpio_manager.output(pin, 1)
-        end_time = time.perf_counter() + self._PULSE_WIDTH_S
-        while time.perf_counter() < end_time:
-            pass
-        gpio_manager.output(pin, 0)
+        if self.release_on_idle:
+            self.disable_drivers()
 
     def enable_drivers(self):
-        """Assert enable lines (active low) to energize both drivers."""
-        if self.left_enable_pin is not None:
-            gpio_manager.output(self.left_enable_pin, 0)
-        if self.right_enable_pin is not None:
-            gpio_manager.output(self.right_enable_pin, 0)
+        """Ensure both stepper channels are ready to energize."""
+        # MotorKit energizes coils on demand; no explicit action required.
+        self._left_engaged = False
+        self._right_engaged = False
 
     def disable_drivers(self):
-        """De-assert enable lines (active low) to release both drivers."""
-        if self.left_enable_pin is not None:
-            gpio_manager.output(self.left_enable_pin, 1)
-        if self.right_enable_pin is not None:
-            gpio_manager.output(self.right_enable_pin, 1)
+        """Release both motors to save power."""
+        self.left_stepper.release()
+        self.right_stepper.release()
+        self._left_engaged = False
+        self._right_engaged = False
