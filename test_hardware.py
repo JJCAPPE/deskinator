@@ -3,12 +3,11 @@
 Hardware test script for Deskinator robot.
 
 Tests all sensors and actuators to verify wiring:
-- I2C bus and device detection
-- TCA9548A I2C multiplexer
-- 4x APDS9960 proximity sensors (through multiplexer)
-- MPU-6050 IMU
-- Left and right stepper motors
-- Vacuum motor PWM
+    - I2C bus and device detection
+    - TCA9548A I2C multiplexer
+    - 4x APDS9960 proximity sensors (through multiplexer)
+    - MPU-6050 IMU
+    - Left and right stepper motors
 
 Run this after completing wiring to verify all connections.
 """
@@ -24,7 +23,6 @@ from hw.tca9548a import TCA9548A
 from hw.apds9960 import APDS9960
 from hw.mpu6050 import MPU6050
 from hw.stepper import StepperDrive
-from hw.vacuum import Vacuum
 from hw.buzzer import Buzzer
 from hw.gesture import GestureSensor
 
@@ -314,52 +312,6 @@ def test_stepper_motors() -> bool:
     return True
 
 
-def test_vacuum() -> bool:
-    """Test vacuum motor PWM."""
-    print_header("VACUUM MOTOR TEST")
-
-    print_test("Initializing vacuum controller")
-    try:
-        vacuum = Vacuum()
-        print_pass(f"PWM pin: GPIO{PINS.VACUUM_PWM}")
-    except Exception as e:
-        print_fail(f"Error: {e}")
-        return False
-
-    print("\n" + Colors.BOLD + "PWM Duty Cycle Test:" + Colors.END)
-    print_info("Testing vacuum motor at different speeds")
-    print_info("Use oscilloscope or multimeter to verify PWM signal")
-    print_info("(If motor is connected, you should hear speed changes)\n")
-
-    duty_cycles = [0.25, 0.50, 0.75, 1.00]
-
-    for duty in duty_cycles:
-        print(f"  Duty cycle: {duty*100:.0f}%")
-        vacuum.on(duty)
-        time.sleep(2.0)
-
-    print("\n  Turning off...")
-    vacuum.off()
-    time.sleep(0.5)
-
-    print_pass("PWM test complete")
-
-    print(
-        "\n"
-        + Colors.YELLOW
-        + "NOTE:"
-        + Colors.END
-        + " Full vacuum motor operation requires:"
-    )
-    print("  - 12V power supply connected")
-    print("  - MOSFET gate connected to PWM pin")
-    print("  - Vacuum motor connected to MOSFET drain")
-    print("  - Proper heatsinking on MOSFET\n")
-
-    vacuum.cleanup()
-    return True
-
-
 def test_buzzer() -> bool:
     """Test buzzer for audio feedback."""
     print_header("BUZZER TEST")
@@ -539,10 +491,6 @@ def main():
     # Test stepper motors
     stepper_ok = test_stepper_motors()
     results["Stepper Motors"] = stepper_ok
-
-    # Test vacuum
-    vacuum_ok = test_vacuum()
-    results["Vacuum Motor"] = vacuum_ok
 
     # Test buzzer
     buzzer_ok = test_buzzer()
