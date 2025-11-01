@@ -7,6 +7,7 @@ and provides odometry feedback.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from importlib import import_module
@@ -23,8 +24,9 @@ except ImportError:  # pragma: no cover - fallback when run as script
 class StepperDrive:
     """Differential drive stepper motor controller."""
 
-    _MIN_STEP_PERIOD_S = 4.0e-5  # minimum time between steps (40 µs)
-    _LOOP_SLEEP_S = 1.0e-4  # 100 microseconds background loop sleep
+    _MIN_STEP_PERIOD_S = 0.003  # practical floor given I2C latency (~333 steps/s)
+    _LOOP_SLEEP_S = 0.001  # 1 ms background loop sleep to reduce CPU churn
+    _I2C_ERROR_SLEEP_S = 0.01  # back-off when the HAT/I2C hiccups
 
     def __init__(
         self,
@@ -40,6 +42,8 @@ class StepperDrive:
                 "Adafruit MotorKit library is required. Install with "
                 "'pip3 install adafruit-circuitpython-motorkit'."
             ) from exc
+
+        self.logger = logging.getLogger(__name__)
 
         if kit is None:
             try:
@@ -68,6 +72,23 @@ class StepperDrive:
         self.release_on_idle = release_on_idle
         self._left_engaged = False
         self._right_engaged = False
+
+        # Determine effective steps-per-meter considering the selected step style.
+        style_multiplier = {
+            self._stepper_module.SINGLE: 1.0,
+            self._stepper_module.DOUBLE: 1.0,
+            self._stepper_module.INTERLEAVE: 2.0,
+        }
+        if hasattr(self._stepper_module, "MICROSTEP"):
+            style_multiplier[self._stepper_module.MICROSTEP] = 8.0
+
+        self._step_style_multiplier = style_multiplier.get(self.step_style, 1.0)
+        self.steps_per_m_effective = GEOM.STEPS_PER_M * self._step_style_multiplier
+        if self.steps_per_m_effective <= 0:
+            raise ValueError("GEOM.STEPS_PER_M must be positive")
+
+        self._max_step_rate = 1.0 / self._MIN_STEP_PERIOD_S
+        self._max_wheel_speed = self._max_step_rate / self.steps_per_m_effective
 
         # Velocity state
         self.v_cmd = 0.0  # commanded linear velocity (m/s)
@@ -98,12 +119,19 @@ class StepperDrive:
         omega = np.clip(omega, -LIMS.OMEGA_MAX, LIMS.OMEGA_MAX)
 
         with self.lock:
-            self.v_cmd = v
-            self.omega_cmd = omega
-
             # Convert to wheel velocities
-            self.vL_target = v - 0.5 * omega * GEOM.WHEEL_BASE
-            self.vR_target = v + 0.5 * omega * GEOM.WHEEL_BASE
+            vL_target = v - 0.5 * omega * GEOM.WHEEL_BASE
+            vR_target = v + 0.5 * omega * GEOM.WHEEL_BASE
+
+            max_wheel = self._max_wheel_speed
+            self.vL_target = np.clip(vL_target, -max_wheel, max_wheel)
+            self.vR_target = np.clip(vR_target, -max_wheel, max_wheel)
+
+            # Store the achievable chassis velocities corresponding to the
+            # clipped wheel targets. This keeps downstream consumers aware of
+            # any saturation we applied.
+            self.v_cmd = 0.5 * (self.vL_target + self.vR_target)
+            self.omega_cmd = (self.vR_target - self.vL_target) / GEOM.WHEEL_BASE
 
     def update(self, dt: float) -> tuple[float, float]:
         """
@@ -125,23 +153,13 @@ class StepperDrive:
             self.vL_current += dv_left
             self.vR_current += dv_right
 
-            # Calculate distances
+            max_wheel = self._max_wheel_speed
+            self.vL_current = np.clip(self.vL_current, -max_wheel, max_wheel)
+            self.vR_current = np.clip(self.vR_current, -max_wheel, max_wheel)
+
+            # Calculate distances using the instantaneous velocity estimate.
             dSL = self.vL_current * dt
             dSR = self.vR_current * dt
-
-            # Update step counters
-            steps_L = int(abs(dSL) * GEOM.STEPS_PER_M)
-            steps_R = int(abs(dSR) * GEOM.STEPS_PER_M)
-
-            if self.vL_current >= 0:
-                self.steps_left += steps_L
-            else:
-                self.steps_left -= steps_L
-
-            if self.vR_current >= 0:
-                self.steps_right += steps_R
-            else:
-                self.steps_right -= steps_R
 
             return dSL, dSR
 
@@ -157,8 +175,8 @@ class StepperDrive:
             self.last_steps_left = self.steps_left
             self.last_steps_right = self.steps_right
 
-            dSL = dSteps_L / GEOM.STEPS_PER_M
-            dSR = dSteps_R / GEOM.STEPS_PER_M
+            dSL = dSteps_L / self.steps_per_m_effective
+            dSR = dSteps_R / self.steps_per_m_effective
 
             return dSL, dSR
 
@@ -188,8 +206,8 @@ class StepperDrive:
                 vL = self.vL_current
                 vR = self.vR_current
 
-            rate_L = abs(vL) * GEOM.STEPS_PER_M
-            rate_R = abs(vR) * GEOM.STEPS_PER_M
+            rate_L = abs(vL) * self.steps_per_m_effective
+            rate_R = abs(vR) * self.steps_per_m_effective
 
             now = time.perf_counter()
 
@@ -200,20 +218,33 @@ class StepperDrive:
                     if vL >= 0
                     else self._stepper_module.BACKWARD
                 )
+                step_delta_L = 1 if direction_L == self._stepper_module.FORWARD else -1
                 while now >= next_left and self.running:
-                    self.left_stepper.onestep(
-                        direction=direction_L, style=self.step_style
-                    )
-                    self._left_engaged = True
-                    next_left += period_L
-                    if next_left - now > period_L:
+                    try:
+                        self.left_stepper.onestep(
+                            direction=direction_L, style=self.step_style
+                        )
+                        with self.lock:
+                            self.steps_left += step_delta_L
+                            self._left_engaged = True
+                        next_left += period_L
+                    except Exception as exc:  # pragma: no cover - hardware path
+                        self.logger.warning(
+                            "Left stepper onestep failed: %s", exc, exc_info=False
+                        )
+                        next_left = time.perf_counter() + self._I2C_ERROR_SLEEP_S
+                        time.sleep(self._I2C_ERROR_SLEEP_S)
                         break
                     now = time.perf_counter()
+                    if next_left - now > period_L:
+                        break
             else:
                 next_left = now
-                if self.release_on_idle and self._left_engaged:
-                    self.left_stepper.release()
-                    self._left_engaged = False
+                if self.release_on_idle:
+                    with self.lock:
+                        if self._left_engaged:
+                            self.left_stepper.release()
+                            self._left_engaged = False
 
             now = time.perf_counter()
             if rate_R > 0.0:
@@ -223,20 +254,33 @@ class StepperDrive:
                     if vR >= 0
                     else self._stepper_module.BACKWARD
                 )
+                step_delta_R = 1 if direction_R == self._stepper_module.FORWARD else -1
                 while now >= next_right and self.running:
-                    self.right_stepper.onestep(
-                        direction=direction_R, style=self.step_style
-                    )
-                    self._right_engaged = True
-                    next_right += period_R
-                    if next_right - now > period_R:
+                    try:
+                        self.right_stepper.onestep(
+                            direction=direction_R, style=self.step_style
+                        )
+                        with self.lock:
+                            self.steps_right += step_delta_R
+                            self._right_engaged = True
+                        next_right += period_R
+                    except Exception as exc:  # pragma: no cover - hardware path
+                        self.logger.warning(
+                            "Right stepper onestep failed: %s", exc, exc_info=False
+                        )
+                        next_right = time.perf_counter() + self._I2C_ERROR_SLEEP_S
+                        time.sleep(self._I2C_ERROR_SLEEP_S)
                         break
                     now = time.perf_counter()
+                    if next_right - now > period_R:
+                        break
             else:
                 next_right = now
-                if self.release_on_idle and self._right_engaged:
-                    self.right_stepper.release()
-                    self._right_engaged = False
+                if self.release_on_idle:
+                    with self.lock:
+                        if self._right_engaged:
+                            self.right_stepper.release()
+                            self._right_engaged = False
 
             time.sleep(self._LOOP_SLEEP_S)
 
