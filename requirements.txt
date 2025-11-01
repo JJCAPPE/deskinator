@@ -5,11 +5,12 @@ smbus2>=0.4
 matplotlib>=3.7
 pyqtgraph>=0.13
 
-# Qt GUI options (install at least one)
-PyQt5>=5.15 ; platform_system == "Linux"
+# Qt GUI backends (install separately as needed)
+# PyQt5>=5.15
 # PySide6>=6.6
 
 # Raspberry Pi / hardware support
 RPi.GPIO ; platform_system == "Linux"
+adafruit-circuitpython-bno08x>=1.0
 adafruit-circuitpython-motorkit>=1.6
 
