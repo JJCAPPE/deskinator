@@ -14,6 +14,7 @@ Run this after completing wiring to verify all connections.
 
 import time
 import sys
+from math import isclose
 from typing import List, Tuple
 
 from config import PINS, I2C as I2C_CONFIG
@@ -250,6 +251,9 @@ def test_stepper_motors() -> bool:
     try:
         drive = StepperDrive(release_on_idle=True)
         print_pass("Adafruit Motor HAT ready")
+        print_info(f"Step style: {drive.step_style_name}")
+        print_info(f"Effective steps/m: {drive.steps_per_meter:.1f}")
+        print_info(f"Max wheel surface speed: {drive.max_wheel_speed:.4f} m/s")
     except Exception as e:
         print_fail(f"Error: {e}")
         return False
@@ -271,6 +275,16 @@ def test_stepper_motors() -> bool:
     for name, v, omega, duration in tests:
         print(f"\n  {name}: v={v:.2f} m/s, ω={omega:.2f} rad/s for {duration:.1f}s")
         drive.command(v, omega)
+        actual_v = drive.v_cmd
+        actual_omega = drive.omega_cmd
+        if not (
+            isclose(actual_v, v, rel_tol=0.05, abs_tol=1e-3)
+            and isclose(actual_omega, omega, rel_tol=0.05, abs_tol=1e-3)
+        ):
+            print_info(
+                "Adjusted command -> "
+                f"v={actual_v:.3f} m/s, ω={actual_omega:.3f} rad/s"
+            )
         end_time = time.time() + duration
         while time.time() < end_time:
             drive.update(dt)

@@ -2,6 +2,7 @@
 """Simple standalone test to exercise the drive motors via the Adafruit HAT."""
 
 import time
+from math import isclose
 
 from config import LIMS
 from hw.stepper import StepperDrive
@@ -25,6 +26,13 @@ def run_sequence(sequence: list[tuple[str, float, float, float]], dt: float = 0.
     """Run a scripted set of velocity commands."""
     drive = StepperDrive(release_on_idle=True)
 
+    print(
+        "\nStepper configuration:"
+        f"\n  Step style: {drive.step_style_name}"
+        f"\n  Steps/m (effective): {drive.steps_per_meter:.1f}"
+        f"\n  Max wheel speed: {drive.max_wheel_speed:.4f} m/s"
+    )
+
     try:
         for label, v_cmd, omega_cmd, duration in sequence:
             v = clamp(v_cmd, -LIMS.V_REV_MAX, LIMS.V_MAX)
@@ -36,6 +44,17 @@ def run_sequence(sequence: list[tuple[str, float, float, float]], dt: float = 0.
             )
 
             drive.command(v, omega)
+
+            actual_v = drive.v_cmd
+            actual_omega = drive.omega_cmd
+            if not (
+                isclose(actual_v, v, rel_tol=0.05, abs_tol=1e-3)
+                and isclose(actual_omega, omega, rel_tol=0.05, abs_tol=1e-3)
+            ):
+                print(
+                    "    -> Saturated to achievable: "
+                    f"v={actual_v:.3f} m/s, omega={actual_omega:.3f} rad/s"
+                )
 
             end_time = time.time() + duration
             while time.time() < end_time:

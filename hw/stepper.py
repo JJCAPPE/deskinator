@@ -180,6 +180,27 @@ class StepperDrive:
 
             return dSL, dSR
 
+    @property
+    def step_style_name(self) -> str:
+        """Human-readable name for the active step style."""
+        mapping = {
+            getattr(self._stepper_module, "SINGLE", None): "SINGLE",
+            getattr(self._stepper_module, "DOUBLE", None): "DOUBLE",
+            getattr(self._stepper_module, "INTERLEAVE", None): "INTERLEAVE",
+            getattr(self._stepper_module, "MICROSTEP", None): "MICROSTEP",
+        }
+        return mapping.get(self.step_style, f"STYLE_{self.step_style}")
+
+    @property
+    def steps_per_meter(self) -> float:
+        """Effective number of motor steps per meter of travel."""
+        return self.steps_per_m_effective
+
+    @property
+    def max_wheel_speed(self) -> float:
+        """Maximum achievable wheel surface speed in m/s."""
+        return self._max_wheel_speed
+
     def start_pulse_generation(self):
         """Start background thread for step scheduling."""
         if self.running:
