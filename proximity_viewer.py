@@ -21,6 +21,8 @@ import sys
 import time
 from typing import List, Optional, Sequence
 
+import numpy as np
+
 try:  # Prefer PyQt5 when available.
     from PyQt5 import QtCore, QtWidgets
 
@@ -42,7 +44,15 @@ from config import I2C
 from hw.apds9960 import APDS9960
 from hw.gesture import GestureSensor
 from hw.i2c import I2CBus
+from hw.mpu6050 import MPU6050
 from hw.tca9548a import TCA9548A
+
+
+def _parse_optional_hex(value: str) -> Optional[int]:
+    value = value.strip().lower()
+    if value in {"none", "null", "off", "disable", "disabled"}:
+        return None
+    return int(value, 0)
 
 
 class ProximityRig:
@@ -56,6 +66,7 @@ class ProximityRig:
         mux_channels: Sequence[int],
         gesture_bus: int,
         gesture_address: int,
+        imu_address: Optional[int] = None,
     ) -> None:
         self.bus = I2CBus(bus_number)
         self.mux = TCA9548A(self.bus, mux_address)
@@ -91,6 +102,20 @@ class ProximityRig:
             gesture = None
         self.gesture = gesture
 
+        self._imu_warning_printed = False
+        if imu_address is None:
+            self.imu: Optional[MPU6050] = None
+        else:
+            try:
+                self.imu = MPU6050(self.bus, imu_address)
+            except Exception as exc:
+                print(
+                    f"Warning: failed to init IMU at address 0x{imu_address:02x}: {exc}"
+                )
+                self.imu = None
+        if self.imu is not None and getattr(self.imu, "sim_mode", False):
+            print("Info: IMU running in simulation mode")
+
     def read(self) -> List[Optional[float]]:
         """Read normalized proximity values for all sensors."""
 
@@ -125,6 +150,28 @@ class ProximityRig:
         values.append(gesture_value)
         return values
 
+    def read_imu(self) -> tuple[Optional[float], Optional[float]]:
+        """Read yaw (rad) and yaw rate (rad/s) from the IMU, if available."""
+
+        if self.imu is None:
+            return None, None
+
+        try:
+            self.mux.select(None)
+        except Exception:
+            pass
+
+        try:
+            yaw, yaw_rate = self.imu.read_yaw_and_rate()
+        except Exception as exc:
+            if not self._imu_warning_printed:
+                print(f"Warning: IMU read error: {exc}")
+                self._imu_warning_printed = True
+            return None, None
+
+        self._imu_warning_printed = False
+        return yaw, yaw_rate
+
     def close(self) -> None:
         """Release I2C resources."""
 
@@ -156,9 +203,10 @@ class ProximityViewer(QtWidgets.QMainWindow):
         self.interval_s = max(0.05, interval_s)
 
         self.sensor_labels = list(rig.channel_names) + ["start_gesture"]
+        self.has_imu = self.rig.imu is not None
 
         self.setWindowTitle("Deskinator Proximity Viewer")
-        self.resize(600, 360)
+        self.resize(760, 520)
 
         pg.setConfigOptions(antialias=True)
 
@@ -177,7 +225,7 @@ class ProximityViewer(QtWidgets.QMainWindow):
         self.plot.setLabel("left", "Normalized proximity", units="arb")
         self.plot.setLabel("bottom", "Sensors")
         self.plot.setTitle("Live proximity (1.0 = near)")
-        layout.addWidget(self.plot, stretch=1)
+        layout.addWidget(self.plot, stretch=3)
 
         ticks = [(i, label) for i, label in enumerate(self.sensor_labels)]
         self.plot.getAxis("bottom").setTicks([ticks])
@@ -190,6 +238,49 @@ class ProximityViewer(QtWidgets.QMainWindow):
             pen=pg.mkPen(30, 120, 180, width=1),
         )
         self.plot.addItem(self.bars)
+
+        imu_frame = QtWidgets.QFrame()
+        imu_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        imu_layout = QtWidgets.QVBoxLayout(imu_frame)
+        imu_layout.setContentsMargins(8, 8, 8, 8)
+        imu_layout.setSpacing(6)
+
+        imu_title = QtWidgets.QLabel("IMU Orientation")
+        imu_title.setAlignment(QtCore.Qt.AlignCenter)
+        imu_layout.addWidget(imu_title)
+
+        self.imu_plot = pg.PlotWidget()
+        self.imu_plot.setAspectLocked(True)
+        self.imu_plot.setRange(xRange=(-1.1, 1.1), yRange=(-1.1, 1.1))
+        self.imu_plot.showGrid(x=True, y=True, alpha=0.1)
+        self.imu_plot.hideAxis("left")
+        self.imu_plot.hideAxis("bottom")
+        imu_layout.addWidget(self.imu_plot, stretch=1)
+
+        theta = np.linspace(0.0, 2.0 * math.pi, 256)
+        self.imu_plot.plot(
+            np.cos(theta),
+            np.sin(theta),
+            pen=pg.mkPen(150, 150, 150, width=1),
+        )
+        self.imu_plot.addLine(
+            x=0.0, pen=pg.mkPen(170, 170, 170, style=QtCore.Qt.DashLine)
+        )
+        self.imu_plot.addLine(
+            y=0.0, pen=pg.mkPen(170, 170, 170, style=QtCore.Qt.DashLine)
+        )
+
+        self.imu_vector = self.imu_plot.plot(
+            [0.0, 0.0],
+            [0.0, 0.0],
+            pen=pg.mkPen(255, 120, 0, width=4),
+        )
+
+        self.imu_label = QtWidgets.QLabel("IMU not configured")
+        self.imu_label.setAlignment(QtCore.Qt.AlignCenter)
+        imu_layout.addWidget(self.imu_label)
+
+        layout.addWidget(imu_frame, stretch=2)
 
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.update_plot)
@@ -213,6 +304,34 @@ class ProximityViewer(QtWidgets.QMainWindow):
 
         self.bars.setOpts(height=heights)
         self.status_label.setText("  |  ".join(parts))
+
+        self.update_imu_display()
+
+    def update_imu_display(self) -> None:
+        self.has_imu = self.rig.imu is not None
+        if not self.has_imu:
+            self.imu_label.setText("IMU not configured")
+            self.imu_vector.setData([0.0, 0.0], [0.0, 0.0])
+            return
+
+        yaw, yaw_rate = self.rig.read_imu()
+        if yaw is None or yaw_rate is None:
+            self.imu_label.setText("IMU data unavailable")
+            self.imu_vector.setData([0.0, 0.0], [0.0, 0.0])
+            return
+
+        vector_length = 0.95
+        x = vector_length * math.sin(yaw)
+        y = vector_length * math.cos(yaw)
+        self.imu_vector.setData([0.0, x], [0.0, y])
+
+        yaw_deg = math.degrees(yaw)
+        yaw_deg = ((yaw_deg + 180.0) % 360.0) - 180.0
+        yaw_rate_deg = math.degrees(yaw_rate)
+        mode_text = "SIM" if getattr(self.rig.imu, "sim_mode", False) else "HW"
+        self.imu_label.setText(
+            f"Yaw: {yaw_deg:6.1f}°   Rate: {yaw_rate_deg:6.1f}°/s   ({mode_text})"
+        )
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -253,6 +372,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=I2C.GESTURE_ADDR,
         help="APDS9960 gesture sensor address (default from config)",
     )
+    parser.add_argument(
+        "--imu-addr",
+        type=_parse_optional_hex,
+        default=I2C.ADDR_IMU,
+        help="IMU I2C address (default from config; 'none' to disable)",
+    )
     return parser.parse_args(argv)
 
 
@@ -266,6 +391,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         mux_channels=I2C.MUX_CHANS,
         gesture_bus=args.gesture_bus,
         gesture_address=args.gesture_addr,
+        imu_address=args.imu_addr,
     )
 
     app = QtWidgets.QApplication(sys.argv)

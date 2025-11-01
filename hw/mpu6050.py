@@ -93,7 +93,7 @@ class MPU6050:
         """Return yaw rate (rad/s)."""
 
         if self.sim_mode:
-            return self._sim_yaw_rate
+            return self._sim_yaw_rate - self._yaw_rate_bias
 
         raw = self._read_word(_GYRO_ZOUT_H)
         deg_per_s = raw / self._gyro_scale
@@ -105,11 +105,21 @@ class MPU6050:
         """Return integrated yaw (rad)."""
 
         if self.sim_mode:
-            return self._sim_yaw
+            return self._sim_yaw - self._yaw_bias
 
         # Ensure integration is up to date even if caller only asks for yaw
         self.read_yaw_rate()
         return self._yaw - self._yaw_bias
+
+    def read_yaw_and_rate(self) -> tuple[float, float]:
+        """Return yaw (rad) and yaw rate (rad/s) in a single call."""
+
+        yaw_rate = self.read_yaw_rate()
+        if self.sim_mode:
+            yaw = self._sim_yaw - self._yaw_bias
+        else:
+            yaw = self._yaw - self._yaw_bias
+        return yaw, yaw_rate
 
     def bias_calibrate(self, duration: float = 2.0):
         """Estimate gyro bias. Keep robot stationary during calibration."""
