@@ -248,66 +248,48 @@ def test_stepper_motors() -> bool:
 
     print_test("Initializing stepper driver")
     try:
-        drive = StepperDrive()
-        print_pass()
+        drive = StepperDrive(release_on_idle=True)
+        print_pass("Adafruit Motor HAT ready")
     except Exception as e:
         print_fail(f"Error: {e}")
         return False
 
-    print_test("Testing GPIO pins")
-    try:
-        print_pass(f"Left: STEP={PINS.LEFT_STEP}, DIR={PINS.LEFT_DIR}")
-        print_info(f"Right: STEP={PINS.RIGHT_STEP}, DIR={PINS.RIGHT_DIR}")
-    except Exception as e:
-        print_fail(f"Error: {e}")
-        return False
+    print("\n" + Colors.BOLD + "Motor Movement Test:" + Colors.END)
+    print_info("Ensure the Motor HAT has 12V power and both motors are connected.")
+    print_info("You should feel or hear each wheel move during the sequences below.")
 
-    print("\n" + Colors.BOLD + "Direction Pin Test:" + Colors.END)
-    print_info("Testing direction pins (you should see DIR pins toggle)")
-    print_info("Use a multimeter or LED to verify 3.3V on DIR pins")
-
-    # Test direction pins
     tests = [
-        ("Both forward", 0.1, 0.0),
-        ("Both reverse", -0.05, 0.0),
-        ("Turn right", 0.1, 0.5),
-        ("Turn left", 0.1, -0.5),
-        ("Stop", 0.0, 0.0),
+        ("Forward crawl", 0.05, 0.0, 2.0),
+        ("Forward faster", 0.12, 0.0, 2.0),
+        ("Spin in place left", 0.0, 0.8, 1.8),
+        ("Spin in place right", 0.0, -0.8, 1.8),
+        ("Reverse", -0.04, 0.0, 1.5),
+        ("Stop", 0.0, 0.0, 1.0),
     ]
 
-    for name, v, omega in tests:
-        print(f"\n  {name}: v={v:.2f} m/s, ω={omega:.2f} rad/s")
+    dt = 0.05
+    for name, v, omega, duration in tests:
+        print(f"\n  {name}: v={v:.2f} m/s, ω={omega:.2f} rad/s for {duration:.1f}s")
         drive.command(v, omega)
-        drive.update(0.1)  # Update to set direction pins
+        end_time = time.time() + duration
+        while time.time() < end_time:
+            drive.update(dt)
+            time.sleep(dt)
 
-        # Calculate expected wheel velocities
-        vL = v - 0.5 * omega * 0.170  # WHEEL_BASE = 0.170m
-        vR = v + 0.5 * omega * 0.170
-
-        dir_left = "FWD" if vL >= 0 else "REV"
-        dir_right = "FWD" if vR >= 0 else "REV"
-
-        print_info(
-            f"    Left: {dir_left} ({vL:+.3f} m/s), Right: {dir_right} ({vR:+.3f} m/s)"
-        )
-        print_info(
-            f"    DIR pins - Left: GPIO{PINS.LEFT_DIR}, Right: GPIO{PINS.RIGHT_DIR}"
-        )
-        time.sleep(2.0)
-
-    print_pass("Direction test complete")
+    drive.stop()
+    print_pass("Motor movement sequence complete")
 
     print(
         "\n"
         + Colors.YELLOW
         + "NOTE:"
         + Colors.END
-        + " Full step pulse generation requires:"
+        + " Motors automatically release when idle."
     )
-    print("  - Power to motor drivers (12V)")
-    print("  - Enable pins pulled low (if using)")
-    print("  - Motors connected")
-    print("  You should hear motors step during normal operation\n")
+    print("  Use `motor_test.py` for longer run diagnostics.\n")
+
+    drive.stop_pulse_generation()
+    drive.disable_drivers()
 
     return True
 

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Simple standalone test to exercise the drive motors."""
+"""Simple standalone test to exercise the drive motors via the Adafruit HAT."""
 
 import time
 
 from config import LIMS
 from hw.stepper import StepperDrive
-from hw.gpio import gpio_manager
 
 
 TEST_SEQUENCE = [
@@ -24,7 +23,7 @@ def clamp(value: float, lo: float, hi: float) -> float:
 
 def run_sequence(sequence: list[tuple[str, float, float, float]], dt: float = 0.02):
     """Run a scripted set of velocity commands."""
-    drive = StepperDrive()
+    drive = StepperDrive(release_on_idle=True)
 
     try:
         for label, v_cmd, omega_cmd, duration in sequence:
@@ -51,7 +50,6 @@ def run_sequence(sequence: list[tuple[str, float, float, float]], dt: float = 0.
         drive.stop()
         drive.stop_pulse_generation()
         drive.disable_drivers()
-        gpio_manager.cleanup()
 
 
 if __name__ == "__main__":
