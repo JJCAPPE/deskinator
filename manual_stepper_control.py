@@ -109,8 +109,11 @@ until another command is given or STOP (space) is pressed.
         self._step_style = step_style
         self._release_on_exit = release_on_exit
 
-        self._left = getattr(kit, "stepper1", None)
-        self._right = getattr(kit, "stepper2", None)
+        # Hardware wiring: physical LEFT motor is on MotorKit.stepper2 and the
+        # physical RIGHT motor is on MotorKit.stepper1. Map them accordingly so
+        # the software directions match the robot's frame.
+        self._left = getattr(kit, "stepper2", None)
+        self._right = getattr(kit, "stepper1", None)
         if self._left is None or self._right is None:
             raise SystemExit(
                 "MotorKit did not report both stepper1 and stepper2. "
@@ -222,7 +225,9 @@ until another command is given or STOP (space) is pressed.
         if self._left_dir:
             self._do_step(self._left, self._left_dir)
         if self._right_dir:
-            self._do_step(self._right, self._right_dir)
+            # Wiring flips the right wheel direction relative to the logical
+            # command orientation, so negate here.
+            self._do_step(self._right, -self._right_dir)
 
     def _do_step(self, motor, direction: int):
         try:
