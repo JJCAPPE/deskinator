@@ -71,6 +71,9 @@ Controls:
 Speed tweaks:
   -/+ : decrease/increase base step rate by the configured step size
   1-4 : preset speeds (25%, 50%, 75%, 100% of max rate)
+  5-8 : boost presets (125%, 150%, 175%, 200%; clipped to max)
+  0   : jump straight to the configured max rate
+  F   : toggle fast mode (base rate <-> max rate)
   ?   : show this help again
 """
 
@@ -90,6 +93,11 @@ Speed tweaks:
         "2": 0.50,
         "3": 0.75,
         "4": 1.00,
+        "5": 1.25,
+        "6": 1.50,
+        "7": 1.75,
+        "8": 2.00,
+        "0": 1.00,
     }
 
     def __init__(
@@ -196,7 +204,13 @@ Speed tweaks:
             self._change_base_rate(-self._rate_step)
             return True
         if key in self.SPEED_LEVELS:
-            self._set_speed_level(self.SPEED_LEVELS[key])
+            if key == "0":
+                self._set_speed_level(1.0, force_max=True)
+            else:
+                self._set_speed_level(self.SPEED_LEVELS[key])
+            return True
+        if key in {"f", "F"}:
+            self._toggle_fast_mode()
             return True
         if key in {"?", "h"}:
             self._show_help()
@@ -233,13 +247,28 @@ Speed tweaks:
         )
         self._print_status_line()
 
-    def _set_speed_level(self, fraction: float):
+    def _set_speed_level(self, fraction: float, *, force_max: bool = False):
         fraction = max(0.0, min(1.0, fraction))
-        new_rate = max(self._min_rate, self._max_rate * fraction)
+        if force_max:
+            new_rate = self._max_rate
+        else:
+            new_rate = max(self._min_rate, self._max_rate * fraction)
         new_rate = self._clip_rate(new_rate)
         self._base_rate = new_rate
         self._sync_targets()
         print(f"\nSpeed preset {fraction * 100:.0f}% -> {self._base_rate:.0f} steps/s")
+        self._print_status_line()
+
+    def _toggle_fast_mode(self):
+        near_max = abs(self._base_rate - self._max_rate) < 1e-6
+        if near_max:
+            new_rate = self._clip_rate(self._base_rate * 0.5)
+            print(f"\nFast mode OFF -> base {new_rate:.0f} steps/s")
+        else:
+            new_rate = self._max_rate
+            print(f"\nFast mode ON -> base {new_rate:.0f} steps/s")
+        self._base_rate = new_rate
+        self._sync_targets()
         self._print_status_line()
 
     def _clip_rate(self, rate: float) -> float:
@@ -362,32 +391,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rate",
         type=float,
-        default=150.0,
-        help="Initial steps per second per motor (default: 150).",
+        default=280.0,
+        help="Initial steps per second per motor (default: 280).",
     )
     parser.add_argument(
         "--min-rate",
         type=float,
-        default=20.0,
-        help="Minimum allowable step rate (default: 20).",
+        default=30.0,
+        help="Minimum allowable step rate (default: 30).",
     )
     parser.add_argument(
         "--max-rate",
         type=float,
-        default=400.0,
-        help="Maximum allowable step rate (default: 400).",
+        default=800.0,
+        help="Maximum allowable step rate (default: 800).",
     )
     parser.add_argument(
         "--rate-step",
         type=float,
-        default=20.0,
-        help="Rate increment/decrement when pressing +/- (default: 20).",
+        default=50.0,
+        help="Rate increment/decrement when pressing +/- (default: 50).",
     )
     parser.add_argument(
         "--accel",
         type=float,
-        default=600.0,
-        help="Slew rate in steps/s^2 for smoothing (default: 600).",
+        default=1400.0,
+        help="Slew rate in steps/s^2 for smoothing (default: 1400).",
     )
     parser.add_argument(
         "--tick-hz",

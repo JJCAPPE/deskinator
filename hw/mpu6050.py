@@ -27,7 +27,14 @@ _GYRO_ZOUT_H = 0x47
 class MPU6050:
     """Simplified MPU-6050 driver for yaw-only use."""
 
-    def __init__(self, bus: I2CBus, address: int = 0x68):
+    def __init__(
+        self,
+        bus: I2CBus,
+        address: int = 0x68,
+        *,
+        auto_calibrate: bool = True,
+        calibration_duration: float = 2.5,
+    ):
         self.bus = bus
         self.address = address
         self.sim_mode = bus.sim_mode
@@ -51,6 +58,18 @@ class MPU6050:
             except Exception as exc:  # pragma: no cover - hardware specific
                 print(f"MPU6050: Initialization failed ({exc}). Using simulation mode.")
                 self.sim_mode = True
+            else:
+                duration = float(calibration_duration)
+                if auto_calibrate and duration > 0.0:
+                    try:
+                        # Allow the sensor a brief moment to settle before sampling
+                        time.sleep(0.1)
+                        self.bias_calibrate(duration=duration)
+                    except Exception as exc:  # pragma: no cover - hardware specific
+                        print(
+                            "MPU6050: Auto bias calibration failed"
+                            f" ({exc}). You may calibrate manually."
+                        )
 
     def _init_sensor(self):
         """Configure sensor for gyro data."""
