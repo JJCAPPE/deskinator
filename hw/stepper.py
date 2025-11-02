@@ -57,8 +57,11 @@ class StepperDrive:
         else:
             self.kit = kit
 
-        self.left_stepper = getattr(self.kit, "stepper1", None)
-        self.right_stepper = getattr(self.kit, "stepper2", None)
+        # Hardware wiring: physical LEFT motor is on MotorKit.stepper2 and the
+        # physical RIGHT motor is on MotorKit.stepper1. Map them accordingly so
+        # the software directions match the robot's frame.
+        self.left_stepper = getattr(self.kit, "stepper2", None)
+        self.right_stepper = getattr(self.kit, "stepper1", None)
         if self.left_stepper is None or self.right_stepper is None:
             raise RuntimeError(
                 "MotorKit did not report both stepper1 and stepper2. "
@@ -270,12 +273,15 @@ class StepperDrive:
             now = time.perf_counter()
             if rate_R > 0.0:
                 period_R = max(1.0 / rate_R, self._MIN_STEP_PERIOD_S)
+                # Wiring flips the right wheel direction relative to the logical
+                # command orientation, so negate here.
                 direction_R = (
-                    self._stepper_module.FORWARD
+                    self._stepper_module.BACKWARD
                     if vR >= 0
-                    else self._stepper_module.BACKWARD
+                    else self._stepper_module.FORWARD
                 )
-                step_delta_R = 1 if direction_R == self._stepper_module.FORWARD else -1
+                # Odometry tracks logical direction (vR), not flipped hardware direction
+                step_delta_R = 1 if vR >= 0 else -1
                 while now >= next_right and self.running:
                     try:
                         self.right_stepper.onestep(
