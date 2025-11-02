@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 """Interactive keyboard drive utility for the Adafruit Stepper Motor HAT.
 
-Use this when you just need to move the robot manually and verify wiring.
-Keys map directly to wheel directions (WASD + QE/ZC) and the utility now
-supports smooth velocity ramps, dynamic speed presets, and on-the-fly rate
-adjustment so the motion feels far less choppy.
+This script is intentionally lightweight so you can confirm the hardware
+stack works end-to-end.  Use the WASD keys (plus Q/E) to jog the robot and
+SPACE to hold position. Press X or CTRL+C to exit.  The default stepping
+rate is conservative (100 steps/s) to stay within what the HAT can deliver
+reliably over I2C while running from Python.
 
 Example usage:
 
-    python3 manual_stepper_control.py --style auto --rate 150 --max-rate 400
+    python3 manual_stepper_control.py --rate 120 --style interleave
 
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 import termios
 import time
 import tty
+from math import inf
 from select import select
 from typing import Optional
 
@@ -57,24 +60,22 @@ class RawTerminal:
 
 
 class KeyboardStepper:
-    """Keyboard-driven jog controller with smooth ramps and speed presets."""
+    """Minimal keyboard-based jog controller."""
 
     PROMPT = """
 Controls:
-  w : both wheels forward          s : both wheels backward
-  a : pivot left (left back)       d : pivot right (right back)
-  q : left wheel forward           z : left wheel backward
-  e : right wheel forward          c : right wheel backward
+  w : both wheels forward
+  s : both wheels backward
+  a : pivot left (left back, right forward)
+  d : pivot right (left forward, right back)
+  q : left wheel forward
+  z : left wheel backward
+  e : right wheel forward
+  c : right wheel backward
   space : hold position (stop stepping)
-  x : exit controller
-
-Speed tweaks:
-  -/+ : decrease/increase base step rate by the configured step size
-  1-4 : preset speeds (25%, 50%, 75%, 100% of max rate)
-  5-8 : boost presets (125%, 150%, 175%, 200%; clipped to max)
-  0   : jump straight to the configured max rate
-  F   : toggle fast mode (base rate <-> max rate)
-  ?   : show this help again
+  x : exit
+Press keys repeatedly or hold them; the last pressed command continues
+until another command is given or STOP (space) is pressed.
 """
 
     COMMANDS = {
@@ -88,35 +89,19 @@ Speed tweaks:
         "c": (0, -1),
     }
 
-    SPEED_LEVELS = {
-        "1": 0.25,
-        "2": 0.50,
-        "3": 0.75,
-        "4": 1.00,
-        "5": 1.25,
-        "6": 1.50,
-        "7": 1.75,
-        "8": 2.00,
-        "0": 1.00,
-    }
-
     def __init__(
         self,
         kit,
         stepper_module,
         *,
         step_style,
-        base_rate: float,
-        rate_step: float,
-        min_rate: float,
-        max_rate: float,
-        accel: float,
-        tick_interval: float,
+        step_period: float,
         release_on_exit: bool,
     ):
         self._kit = kit
         self._stepper_module = stepper_module
         self._step_style = step_style
+        self._period = max(step_period, 1e-3)
         self._release_on_exit = release_on_exit
 
         self._left = getattr(kit, "stepper1", None)
@@ -127,54 +112,39 @@ Speed tweaks:
                 "Check hardware wiring."
             )
 
-        self._min_rate = max(1.0, min_rate)
-        self._max_rate = max(self._min_rate, max_rate)
-        self._rate_step = max(1.0, abs(rate_step))
-        self._base_rate = self._clip_rate(base_rate)
-        self._slew_per_sec = max(0.0, accel)
-        self._tick_interval = max(1e-3, tick_interval)
-
-        self._cmd_left = 0
-        self._cmd_right = 0
-        self._target_left = 0.0
-        self._target_right = 0.0
-        self._left_rate = 0.0
-        self._right_rate = 0.0
-        self._left_phase = 0.0
-        self._right_phase = 0.0
-
-        self._status_interval = 0.2
-        self._next_status = 0.0
+        self._left_dir = 0
+        self._right_dir = 0
 
     def run(self):
         """Main interactive loop."""
 
         self._print_banner()
-        self._show_help()
-        self._print_status_line(newline=True)
 
-        last_tick = time.monotonic()
+        next_step = time.monotonic()
         try:
             with RawTerminal(sys.stdin):
                 while True:
-                    key = self._read_key(self._tick_interval)
-
-                    now = time.monotonic()
-                    dt = now - last_tick
-                    last_tick = now
-                    if dt <= 0.0:
-                        dt = 1e-6
-                    elif dt > 0.2:
-                        dt = 0.2
+                    timeout = max(0.0, next_step - time.monotonic())
+                    key = self._read_key(timeout)
 
                     if key:
                         key = key.lower()
-                        if not self._handle_key(key):
+                        if key == "x":
+                            print("\nExiting...")
                             break
+                        if key == " ":
+                            self._set_command(0, 0)
+                            continue
+                        dirs = self.COMMANDS.get(key)
+                        if dirs:
+                            self._set_command(*dirs)
+                        else:
+                            print(f"\nUnmapped key: {repr(key)}")
 
-                    self._update_rates(dt)
-                    self._service_steps(dt)
-                    self._maybe_refresh_status(now)
+                    now = time.monotonic()
+                    if now >= next_step:
+                        self._step_once()
+                        next_step = now + self._period
         except KeyboardInterrupt:
             print("\nInterrupted by user")
         finally:
@@ -187,132 +157,28 @@ Speed tweaks:
             return sys.stdin.read(1)
         return None
 
-    def _handle_key(self, key: str) -> bool:
-        if key == "x":
-            print("\nExiting...")
-            return False
-        if key == " ":
-            self._set_command(0, 0)
-            return True
-        if key in self.COMMANDS:
-            self._set_command(*self.COMMANDS[key])
-            return True
-        if key in {"+", "="}:
-            self._change_base_rate(self._rate_step)
-            return True
-        if key in {"-", "_"}:
-            self._change_base_rate(-self._rate_step)
-            return True
-        if key in self.SPEED_LEVELS:
-            if key == "0":
-                self._set_speed_level(1.0, force_max=True)
-            else:
-                self._set_speed_level(self.SPEED_LEVELS[key])
-            return True
-        if key in {"f", "F"}:
-            self._toggle_fast_mode()
-            return True
-        if key in {"?", "h"}:
-            self._show_help()
-            self._print_status_line(newline=True)
-            return True
-        if key == "\x03":  # Ctrl+C
-            raise KeyboardInterrupt
-
-        print(f"\nUnmapped key: {repr(key)}")
-        return True
-
     def _set_command(self, left_dir: int, right_dir: int):
-        self._cmd_left = int(left_dir)
-        self._cmd_right = int(right_dir)
-        self._sync_targets()
-        self._print_status_line(newline=True)
-
-    def _sync_targets(self):
-        self._target_left = self._cmd_left * self._base_rate
-        self._target_right = self._cmd_right * self._base_rate
-
-    def _change_base_rate(self, delta: float):
-        if delta == 0.0:
-            return
-        new_rate = self._clip_rate(self._base_rate + delta)
-        if abs(new_rate - self._base_rate) < 1e-6:
-            print("\nBase rate already at limit.")
-            return
-        self._base_rate = new_rate
-        self._sync_targets()
+        self._left_dir = int(left_dir)
+        self._right_dir = int(right_dir)
         print(
-            f"\nBase rate -> {self._base_rate:.0f} steps/s "
-            f"(limits {self._min_rate:.0f}-{self._max_rate:.0f})"
-        )
-        self._print_status_line()
-
-    def _set_speed_level(self, fraction: float, *, force_max: bool = False):
-        fraction = max(0.0, min(1.0, fraction))
-        if force_max:
-            new_rate = self._max_rate
-        else:
-            new_rate = max(self._min_rate, self._max_rate * fraction)
-        new_rate = self._clip_rate(new_rate)
-        self._base_rate = new_rate
-        self._sync_targets()
-        print(f"\nSpeed preset {fraction * 100:.0f}% -> {self._base_rate:.0f} steps/s")
-        self._print_status_line()
-
-    def _toggle_fast_mode(self):
-        near_max = abs(self._base_rate - self._max_rate) < 1e-6
-        if near_max:
-            new_rate = self._clip_rate(self._base_rate * 0.5)
-            print(f"\nFast mode OFF -> base {new_rate:.0f} steps/s")
-        else:
-            new_rate = self._max_rate
-            print(f"\nFast mode ON -> base {new_rate:.0f} steps/s")
-        self._base_rate = new_rate
-        self._sync_targets()
-        self._print_status_line()
-
-    def _clip_rate(self, rate: float) -> float:
-        return max(self._min_rate, min(self._max_rate, rate))
-
-    def _update_rates(self, dt: float):
-        if dt <= 0.0:
-            return
-        max_delta = self._slew_per_sec * dt if self._slew_per_sec > 0 else float("inf")
-        self._left_rate = self._approach(self._left_rate, self._target_left, max_delta)
-        self._right_rate = self._approach(
-            self._right_rate, self._target_right, max_delta
+            f"\rLeft: {self._dir_label(self._left_dir)} | "
+            f"Right: {self._dir_label(self._right_dir)}",
+            end="",
+            flush=True,
         )
 
-    @staticmethod
-    def _approach(value: float, target: float, max_delta: float) -> float:
-        delta = target - value
-        if abs(delta) <= max_delta:
-            return target
-        step = max_delta if delta > 0 else -max_delta
-        return value + step
+    def _dir_label(self, direction: int) -> str:
+        if direction > 0:
+            return "forward"
+        if direction < 0:
+            return "backward"
+        return "stop"
 
-    def _service_steps(self, dt: float):
-        self._service_motor(dt, self._left_rate, self._left, is_left=True)
-        self._service_motor(dt, self._right_rate, self._right, is_left=False)
-
-    def _service_motor(self, dt: float, rate: float, motor, *, is_left: bool):
-        if abs(rate) < 1e-6:
-            if is_left:
-                self._left_phase = 0.0
-            else:
-                self._right_phase = 0.0
-            return
-
-        phase_attr = "_left_phase" if is_left else "_right_phase"
-        phase = getattr(self, phase_attr)
-        phase += abs(rate) * dt
-        direction = 1 if rate > 0 else -1
-
-        while phase >= 1.0:
-            self._do_step(motor, direction)
-            phase -= 1.0
-
-        setattr(self, phase_attr, phase)
+    def _step_once(self):
+        if self._left_dir:
+            self._do_step(self._left, self._left_dir)
+        if self._right_dir:
+            self._do_step(self._right, self._right_dir)
 
     def _do_step(self, motor, direction: int):
         try:
@@ -338,40 +204,16 @@ Speed tweaks:
         except Exception:
             pass
 
-    def _maybe_refresh_status(self, now: float):
-        if now >= self._next_status:
-            self._print_status_line()
-            self._next_status = now + self._status_interval
-
-    def _print_status_line(self, newline: bool = False):
-        status = (
-            f"Base {self._base_rate:.0f} sps | "
-            f"L {self._status_label(self._left_rate)} | "
-            f"R {self._status_label(self._right_rate)}"
-        )
-        prefix = "\n" if newline else "\r"
-        print(f"{prefix}{status:<80}", end="", flush=True)
-
-    def _status_label(self, rate: float) -> str:
-        if abs(rate) < 1e-2:
-            return "stop"
-        direction = "fwd" if rate > 0 else "rev"
-        return f"{direction} @ {abs(rate):.0f}sps"
-
     def _print_banner(self):
         style_name = self._style_name(self._step_style)
+        rate = 1.0 / self._period if self._period > 0 else inf
         print("=" * 60)
         print("  Adafruit Stepper HAT keyboard controller")
         print(f"  Step style: {style_name}")
-        print(
-            f"  Rate limits: {self._min_rate:.0f}-{self._max_rate:.0f} steps/s, "
-            f"step increment {self._rate_step:.0f}"
-        )
-        print(
-            f"  Slew limit: {self._slew_per_sec:.0f} steps/s^2, tick {self._tick_interval*1000:.1f} ms"
-        )
-        print("  Press '?' for help, 'x' to exit, CTRL+C to abort.")
+        print(f"  Target step rate: {rate:.1f} steps/s per motor")
+        print("  Press X or CTRL+C to exit.")
         print("=" * 60)
+        print(self.PROMPT)
 
     def _style_name(self, style_code: int) -> str:
         mapping = {
@@ -382,53 +224,20 @@ Speed tweaks:
         }
         return mapping.get(style_code, f"0x{style_code:02X}")
 
-    def _show_help(self):
-        print(self.PROMPT)
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--rate",
         type=float,
-        default=280.0,
-        help="Initial steps per second per motor (default: 280).",
-    )
-    parser.add_argument(
-        "--min-rate",
-        type=float,
-        default=30.0,
-        help="Minimum allowable step rate (default: 30).",
-    )
-    parser.add_argument(
-        "--max-rate",
-        type=float,
-        default=800.0,
-        help="Maximum allowable step rate (default: 800).",
-    )
-    parser.add_argument(
-        "--rate-step",
-        type=float,
-        default=50.0,
-        help="Rate increment/decrement when pressing +/- (default: 50).",
-    )
-    parser.add_argument(
-        "--accel",
-        type=float,
-        default=1400.0,
-        help="Slew rate in steps/s^2 for smoothing (default: 1400).",
-    )
-    parser.add_argument(
-        "--tick-hz",
-        type=float,
-        default=400.0,
-        help="Scheduler update frequency in Hz (default: 400).",
+        default=100.0,
+        help="Target steps per second per motor (default: 100).",
     )
     parser.add_argument(
         "--style",
-        choices=["auto", "single", "double", "interleave", "microstep"],
-        default="auto",
-        help="Stepper style (auto prefers microstep if available).",
+        choices=["single", "double", "interleave", "microstep"],
+        default="interleave",
+        help="Stepper style to use (default: interleave).",
     )
     parser.add_argument(
         "--hold",
@@ -447,45 +256,26 @@ def main():
         "double": stepper_module.DOUBLE,
         "interleave": stepper_module.INTERLEAVE,
     }
-    microstep_available = hasattr(stepper_module, "MICROSTEP")
-    if microstep_available:
+    if hasattr(stepper_module, "MICROSTEP"):
         style_lookup["microstep"] = stepper_module.MICROSTEP
-
-    if args.style == "auto":
-        step_style = (
-            style_lookup["microstep"]
-            if microstep_available
-            else style_lookup["interleave"]
-        )
-    elif args.style == "microstep":
-        if not microstep_available:
-            raise SystemExit("Microstepping not supported by this library build.")
-        step_style = style_lookup["microstep"]
     else:
-        try:
-            step_style = style_lookup[args.style]
-        except KeyError as exc:  # pragma: no cover - should not happen with choices
-            raise SystemExit(f"Unsupported style: {args.style}") from exc
+        style_lookup.pop("microstep", None)
+        if args.style == "microstep":
+            raise SystemExit("Microstepping not supported by this library build.")
 
-    min_rate = max(1.0, args.min_rate)
-    max_rate = max(min_rate, args.max_rate)
-    base_rate = max(min_rate, min(max_rate, args.rate))
-    rate_step = max(1.0, args.rate_step)
-    accel = max(0.0, args.accel)
-    tick_hz = max(10.0, args.tick_hz)
-    tick_interval = 1.0 / tick_hz
+    try:
+        step_style = style_lookup[args.style]
+    except KeyError as exc:  # pragma: no cover - should not happen with choices
+        raise SystemExit(f"Unsupported style: {args.style}") from exc
+
+    period = 1.0 / args.rate if args.rate > 0 else 0.01
 
     kit = MotorKit()
     controller = KeyboardStepper(
         kit,
         stepper_module,
         step_style=step_style,
-        base_rate=base_rate,
-        rate_step=rate_step,
-        min_rate=min_rate,
-        max_rate=max_rate,
-        accel=accel,
-        tick_interval=tick_interval,
+        step_period=period,
         release_on_exit=not args.hold,
     )
     controller.run()

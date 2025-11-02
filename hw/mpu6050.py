@@ -117,8 +117,9 @@ class MPU6050:
         raw = self._read_word(_GYRO_ZOUT_H)
         deg_per_s = raw / self._gyro_scale
         rad_per_s = math.radians(deg_per_s)
-        self._update_integration(rad_per_s)
-        return rad_per_s - self._yaw_rate_bias
+        corrected = rad_per_s - self._yaw_rate_bias
+        self._update_integration(corrected)
+        return corrected
 
     def read_yaw_abs(self) -> float:
         """Return integrated yaw (rad)."""
@@ -154,15 +155,17 @@ class MPU6050:
         start = time.time()
 
         while time.time() - start < duration:
-            yaw_rates.append(self.read_yaw_rate())
-            yaws.append(self.read_yaw_abs())
+            yaw, yaw_rate = self.read_yaw_and_rate()
+            # Store raw gyro rate samples (before bias subtraction)
+            yaw_rates.append(yaw_rate + self._yaw_rate_bias)
+            yaws.append(yaw)
             time.sleep(0.02)
 
         self._yaw_rate_bias = mean(yaw_rates)
-        self._yaw_bias = mean(yaws)
+        self._yaw_bias = self._yaw
 
         print(f"  Yaw rate bias: {self._yaw_rate_bias:.5f} rad/s")
-        print(f"  Yaw bias: {self._yaw_bias:.5f} rad")
+        print(f"  Yaw offset reset to: {self._yaw:.5f} rad")
 
     # --- Simulation helpers -------------------------------------------------
     def set_sim_state(self, yaw: float, yaw_rate: float):
