@@ -235,9 +235,9 @@ class StepperDrive:
             if rate_L > 0.0:
                 period_L = max(1.0 / rate_L, self._MIN_STEP_PERIOD_S)
                 direction_L = (
-                    self._stepper_module.BACKWARD
+                    self._stepper_module.FORWARD
                     if vL >= 0
-                    else self._stepper_module.FORWARD
+                    else self._stepper_module.BACKWARD
                 )
                 step_delta_L = 1 if direction_L == self._stepper_module.FORWARD else -1
                 while now >= next_left and self.running:
@@ -271,9 +271,9 @@ class StepperDrive:
             if rate_R > 0.0:
                 period_R = max(1.0 / rate_R, self._MIN_STEP_PERIOD_S)
                 direction_R = (
-                    self._stepper_module.BACKWARD
+                    self._stepper_module.FORWARD
                     if vR >= 0
-                    else self._stepper_module.FORWARD
+                    else self._stepper_module.BACKWARD
                 )
                 step_delta_R = 1 if direction_R == self._stepper_module.FORWARD else -1
                 while now >= next_right and self.running:
