@@ -52,7 +52,9 @@ class Geometry:
     """
 
     WHEEL_BASE: float = 0.170  # m (update from CAD)
-    STEPS_PER_M: float = 6400.0  # set from microstepping/drive
+    STEPS_PER_M: float = (
+        1212.1  # calibrated from physical test: 0.33m actual / 0.0625m odometry = 5.28x correction
+    )
     SENSOR_FWD: float = 0.080  # m; sensors lead axle
     SENSOR_LAT: tuple[float, ...] = (+0.08484, +0.05444, -0.0544, -0.08484)  # m
     VAC_WIDTH: float = 0.198  # m; effective cleaned width
