@@ -116,23 +116,32 @@ class ProximityRig:
         if self.imu is not None and getattr(self.imu, "sim_mode", False):
             print("Info: IMU running in simulation mode")
 
-    def read(self) -> List[Optional[float]]:
-        """Read normalized proximity values for all sensors."""
+    def read(self) -> tuple[List[Optional[float]], List[Optional[int]]]:
+        """Read normalized proximity values and raw values for all sensors.
+
+        Returns:
+            Tuple of (normalized_values, raw_values)
+        """
 
         values: List[Optional[float]] = []
+        raw_values: List[Optional[int]] = []
 
         for ch, sensor in zip(self.mux_channels, self.sensors):
             if sensor is None:
                 values.append(None)
+                raw_values.append(None)
                 continue
 
             try:
                 self.mux.select(ch)
                 time.sleep(0.002)
+                raw = sensor.read_proximity_raw()
                 reading = sensor.read_proximity_norm()
+                raw_values.append(raw)
             except Exception as exc:
                 print(f"Warning: read error on channel {ch}: {exc}")
                 reading = None
+                raw_values.append(None)
 
             values.append(reading)
 
@@ -140,15 +149,19 @@ class ProximityRig:
 
         if self.gesture is not None:
             try:
+                gesture_raw = self.gesture.read_proximity_raw()
                 gesture_value = self.gesture.read_proximity_norm()
+                raw_values.append(gesture_raw)
             except Exception as exc:
                 print(f"Warning: gesture sensor read error: {exc}")
                 gesture_value = None
+                raw_values.append(None)
         else:
             gesture_value = None
+            raw_values.append(None)
 
         values.append(gesture_value)
-        return values
+        return values, raw_values
 
     def read_imu(self) -> tuple[Optional[float], Optional[float]]:
         """Read yaw (rad) and yaw rate (rad/s) from the IMU, if available."""
@@ -289,18 +302,24 @@ class ProximityViewer(QtWidgets.QMainWindow):
         self.update_plot()
 
     def update_plot(self) -> None:
-        readings = self.rig.read()
+        readings, raw_readings = self.rig.read()
 
         heights: List[float] = []
         parts = []
-        for label, value in zip(self.sensor_labels, readings):
+        for label, value, raw_value in zip(self.sensor_labels, readings, raw_readings):
             if value is None or not math.isfinite(value):
                 heights.append(0.0)
-                parts.append(f"{label}=--")
+                if raw_value is not None:
+                    parts.append(f"{label}=-- (raw:{raw_value})")
+                else:
+                    parts.append(f"{label}=-- (raw:--)")
             else:
                 clamped = max(0.0, min(1.0, float(value)))
                 heights.append(clamped)
-                parts.append(f"{label}={clamped:0.2f}")
+                if raw_value is not None:
+                    parts.append(f"{label}={clamped:0.2f} (raw:{raw_value})")
+                else:
+                    parts.append(f"{label}={clamped:0.2f} (raw:--)")
 
         self.bars.setOpts(height=heights)
         self.status_label.setText("  |  ".join(parts))
