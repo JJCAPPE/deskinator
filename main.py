@@ -242,6 +242,8 @@ class Deskinator:
             sensor_readings = []
             for i, sensor in enumerate(self.sensors):
                 self.mux.select(I2C.MUX_CHANS[i])
+                # Allow brief settle time after switching MUX channel
+                time.sleep(0.002)
                 reading = sensor.read_proximity_norm()
                 sensor_readings.append(reading)
 

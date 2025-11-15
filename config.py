@@ -20,8 +20,8 @@ class Pins:
     VACUUM_PWM: int = 5  # Vacuum MOSFET     GPIO5
     BUZZER: int = 12  # Buzzer/Beeper      GPIO12
     # Gesture sensor I2C (separate bus or software I2C)
-    GESTURE_SDA: int = 17  # Gesture APDS9960 SDA GPIO17
-    GESTURE_SCL: int = 4  # Gesture APDS9960 SCL GPIO4
+    GESTURE_SDA: int = 15  # Gesture APDS9960 SDA GPIO17
+    GESTURE_SCL: int = 14  # Gesture APDS9960 SCL GPIO4
 
 
 @dataclass

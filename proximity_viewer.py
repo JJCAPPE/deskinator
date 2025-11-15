@@ -362,6 +362,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Refresh interval in seconds (default: 0.1)",
     )
     parser.add_argument(
+        "--calibrate",
+        action="store_true",
+        help="Calibrate APDS sensors (interactive) and exit",
+    )
+    parser.add_argument(
         "--bus",
         type=int,
         default=I2C.BUS,
@@ -402,6 +407,34 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+
+    # Optional one-shot calibration path
+    if args.calibrate:
+        rig = ProximityRig(
+            bus_number=args.bus,
+            sensor_address=args.sensor_addr,
+            mux_address=args.mux_addr,
+            mux_channels=I2C.MUX_CHANS,
+            gesture_bus=args.gesture_bus,
+            gesture_address=args.gesture_addr,
+            imu_address=args.imu_addr,
+        )
+        print("\nStarting APDS calibration (place over table, then off edge when prompted)...")
+        for ch, sensor in zip(rig.mux_channels, rig.sensors):
+            if sensor is None:
+                print(f"- Channel {ch}: not present, skipping")
+                continue
+            try:
+                rig.mux.select(ch)
+                time.sleep(0.01)
+                print(f"\nCalibrating sensor on channel {ch}:")
+                sensor.calibrate(on_table_samples=10, off_table_samples=10)
+            except Exception as exc:
+                print(f"  Calibration error on channel {ch}: {exc}")
+        rig.mux.select(None)
+        rig.close()
+        print("\nCalibration complete.")
+        return 0
 
     rig = ProximityRig(
         bus_number=args.bus,

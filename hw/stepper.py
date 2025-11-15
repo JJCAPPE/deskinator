@@ -1,8 +1,9 @@
 """
-Stepper motor driver using the Adafruit DC & Stepper Motor HAT (MotorKit API).
+Stepper motor driver for A4988 stepper motor drivers.
 
-Converts velocity commands to wheel velocities, schedules stepper moves,
-and provides odometry feedback.
+Controls two A4988 drivers via GPIO pins for smooth differential drive motion.
+Uses microstepping (1/16) for maximum smoothness and implements acceleration
+ramping for jerk-free motion.
 """
 
 from __future__ import annotations
@@ -10,86 +11,78 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from importlib import import_module
 from typing import Optional
 
 import numpy as np
 
 try:  # Support both package and script execution
-    from ..config import GEOM, LIMS  # type: ignore[import-not-found]
+    from ..config import GEOM, LIMS, PINS  # type: ignore[import-not-found]
+    from .gpio import gpio_manager
 except ImportError:  # pragma: no cover - fallback when run as script
-    from config import GEOM, LIMS
+    from config import GEOM, LIMS, PINS
+    from hw.gpio import gpio_manager
 
 
 class StepperDrive:
-    """Differential drive stepper motor controller."""
+    """Differential drive stepper motor controller using A4988 drivers."""
 
-    _MIN_STEP_PERIOD_S = 0.003  # practical floor given I2C latency (~333 steps/s)
-    _LOOP_SLEEP_S = 0.001  # 1 ms background loop sleep to reduce CPU churn
-    _I2C_ERROR_SLEEP_S = 0.01  # back-off when the HAT/I2C hiccups
+    # Timing constants for A4988
+    _MIN_STEP_PULSE_WIDTH_US = 1  # Minimum step pulse width (microseconds)
+    _MIN_STEP_PULSE_WIDTH_S = _MIN_STEP_PULSE_WIDTH_US / 1e6
+    _STEP_PULSE_WIDTH_S = 10e-6  # 10 microseconds - safe pulse width
+    _LOOP_SLEEP_S = 0.0001  # 100 µs background loop sleep for precise timing
+    _MIN_STEP_PERIOD_S = 0.0001  # Minimum step period (10 kHz max = 0.1 ms)
+
+    @staticmethod
+    def _busy_wait(duration_s: float):
+        """Busy-wait for precise short delays."""
+        if duration_s <= 0:
+            return
+        end_time = time.perf_counter() + duration_s
+        while time.perf_counter() < end_time:
+            pass
+
+    # Microstepping: A4988 default is 1/16 microstep mode
+    # This means 16 microsteps per full step
+    MICROSTEPS_PER_STEP = 16
 
     def __init__(
         self,
-        kit: Optional[object] = None,
         *,
-        step_style: Optional[int] = None,
+        microsteps_per_step: int = 16,
         release_on_idle: bool = False,
     ):
-        try:
-            stepper_module = import_module("adafruit_motor.stepper")
-        except ImportError as exc:  # pragma: no cover - hardware dependency
-            raise ImportError(
-                "Adafruit MotorKit library is required. Install with "
-                "'pip3 install adafruit-circuitpython-motorkit'."
-            ) from exc
+        """
+        Initialize A4988 stepper motor driver.
 
+        Args:
+            microsteps_per_step: Number of microsteps per full step (default 16 for 1/16 microstepping)
+            release_on_idle: If True, disable drivers when motors are idle
+        """
         self.logger = logging.getLogger(__name__)
-
-        if kit is None:
-            try:
-                motorhat_module = import_module("adafruit_motorkit")
-            except ImportError as exc:  # pragma: no cover - hardware dependency
-                raise ImportError(
-                    "Adafruit MotorKit library is required. Install with "
-                    "'pip3 install adafruit-circuitpython-motorkit'."
-                ) from exc
-            self.kit = motorhat_module.MotorKit()
-        else:
-            self.kit = kit
-
-        # Hardware wiring: physical LEFT motor is on MotorKit.stepper2 and the
-        # physical RIGHT motor is on MotorKit.stepper1. Map them accordingly so
-        # the software directions match the robot's frame.
-        self.left_stepper = getattr(self.kit, "stepper2", None)
-        self.right_stepper = getattr(self.kit, "stepper1", None)
-        if self.left_stepper is None or self.right_stepper is None:
-            raise RuntimeError(
-                "MotorKit did not report both stepper1 and stepper2. "
-                "Ensure the DC & Stepper Motor HAT is connected."
-            )
-
-        self._stepper_module = stepper_module
-        self.step_style = (
-            step_style if step_style is not None else self._stepper_module.INTERLEAVE
-        )
+        self.microsteps_per_step = microsteps_per_step
         self.release_on_idle = release_on_idle
-        self._left_engaged = False
-        self._right_engaged = False
 
-        # Determine effective steps-per-meter considering the selected step style.
-        style_multiplier = {
-            self._stepper_module.SINGLE: 1.0,
-            self._stepper_module.DOUBLE: 1.0,
-            self._stepper_module.INTERLEAVE: 2.0,
-        }
-        if hasattr(self._stepper_module, "MICROSTEP"):
-            style_multiplier[self._stepper_module.MICROSTEP] = 8.0
+        # Initialize GPIO
+        gpio_manager.setup()
 
-        self._step_style_multiplier = style_multiplier.get(self.step_style, 1.0)
-        self.steps_per_m_effective = GEOM.STEPS_PER_M * self._step_style_multiplier
+        # Setup GPIO pins for left motor
+        gpio_manager.setup_output(PINS.LEFT_STEP, initial=0)
+        gpio_manager.setup_output(PINS.LEFT_DIR, initial=0)
+        gpio_manager.setup_output(PINS.LEFT_ENABLE, initial=1)  # Start disabled (active low)
+
+        # Setup GPIO pins for right motor
+        gpio_manager.setup_output(PINS.RIGHT_STEP, initial=0)
+        gpio_manager.setup_output(PINS.RIGHT_DIR, initial=0)
+        gpio_manager.setup_output(PINS.RIGHT_ENABLE, initial=1)  # Start disabled (active low)
+
+        # Calculate effective steps-per-meter considering microstepping
+        # GEOM.STEPS_PER_M is full steps per meter, multiply by microsteps
+        self.steps_per_m_effective = GEOM.STEPS_PER_M * self.microsteps_per_step
         if self.steps_per_m_effective <= 0:
             raise ValueError("GEOM.STEPS_PER_M must be positive")
 
+        # Maximum step rate (steps per second)
         self._max_step_rate = 1.0 / self._MIN_STEP_PERIOD_S
         self._max_wheel_speed = self._max_step_rate / self.steps_per_m_effective
 
@@ -101,7 +94,7 @@ class StepperDrive:
         self.vL_current = 0.0  # current left wheel velocity (with limits)
         self.vR_current = 0.0  # current right wheel velocity (with limits)
 
-        # Odometry counters
+        # Odometry counters (in microsteps)
         self.steps_left = 0
         self.steps_right = 0
         self.last_steps_left = 0
@@ -111,6 +104,10 @@ class StepperDrive:
         self.running = False
         self.pulse_thread = None
         self.lock = threading.Lock()
+
+        # Motor enable state
+        self._left_enabled = False
+        self._right_enabled = False
 
         # Start background pulse generation immediately so commands take effect
         self.start_pulse_generation()
@@ -186,13 +183,7 @@ class StepperDrive:
     @property
     def step_style_name(self) -> str:
         """Human-readable name for the active step style."""
-        mapping = {
-            getattr(self._stepper_module, "SINGLE", None): "SINGLE",
-            getattr(self._stepper_module, "DOUBLE", None): "DOUBLE",
-            getattr(self._stepper_module, "INTERLEAVE", None): "INTERLEAVE",
-            getattr(self._stepper_module, "MICROSTEP", None): "MICROSTEP",
-        }
-        return mapping.get(self.step_style, f"STYLE_{self.step_style}")
+        return f"MICROSTEP_{self.microsteps_per_step}"
 
     @property
     def steps_per_meter(self) -> float:
@@ -221,7 +212,7 @@ class StepperDrive:
             self.pulse_thread.join(timeout=1.0)
 
     def _pulse_loop(self):
-        """Background loop for scheduling stepper moves via MotorKit."""
+        """Background loop for generating step pulses via GPIO."""
         next_left = time.perf_counter()
         next_right = next_left
 
@@ -230,86 +221,110 @@ class StepperDrive:
                 vL = self.vL_current
                 vR = self.vR_current
 
-            rate_L = abs(vL) * self.steps_per_m_effective
-            rate_R = abs(vR) * self.steps_per_m_effective
-
             now = time.perf_counter()
 
+            # Left motor pulse generation
+            rate_L = abs(vL) * self.steps_per_m_effective
             if rate_L > 0.0:
                 period_L = max(1.0 / rate_L, self._MIN_STEP_PERIOD_S)
-                direction_L = (
-                    self._stepper_module.FORWARD
-                    if vL >= 0
-                    else self._stepper_module.BACKWARD
-                )
-                step_delta_L = 1 if direction_L == self._stepper_module.FORWARD else -1
+                direction_L = 1 if vL >= 0 else 0
+
+                # Set direction pin
+                gpio_manager.output(PINS.LEFT_DIR, direction_L)
+
+                # Generate step pulses
                 while now >= next_left and self.running:
-                    try:
-                        self.left_stepper.onestep(
-                            direction=direction_L, style=self.step_style
-                        )
-                        with self.lock:
-                            self.steps_left += step_delta_L
-                            self._left_engaged = True
-                        next_left += period_L
-                    except Exception as exc:  # pragma: no cover - hardware path
-                        self.logger.warning(
-                            "Left stepper onestep failed: %s", exc, exc_info=False
-                        )
-                        next_left = time.perf_counter() + self._I2C_ERROR_SLEEP_S
-                        time.sleep(self._I2C_ERROR_SLEEP_S)
-                        break
+                    # Generate step pulse with precise timing
+                    gpio_manager.output(PINS.LEFT_STEP, 1)
+                    self._busy_wait(self._STEP_PULSE_WIDTH_S)
+                    gpio_manager.output(PINS.LEFT_STEP, 0)
+
+                    # Update odometry
+                    step_delta = 1 if vL >= 0 else -1
+                    with self.lock:
+                        self.steps_left += step_delta
+
+                    next_left += period_L
                     now = time.perf_counter()
+
+                    # Don't accumulate too many steps at once
                     if next_left - now > period_L:
                         break
             else:
                 next_left = now
-                if self.release_on_idle:
-                    with self.lock:
-                        if self._left_engaged:
-                            self.left_stepper.release()
-                            self._left_engaged = False
 
+            # Right motor pulse generation
             now = time.perf_counter()
+            rate_R = abs(vR) * self.steps_per_m_effective
             if rate_R > 0.0:
                 period_R = max(1.0 / rate_R, self._MIN_STEP_PERIOD_S)
-                # Wiring flips the right wheel direction relative to the logical
-                # command orientation, so negate here.
-                direction_R = (
-                    self._stepper_module.BACKWARD
-                    if vR >= 0
-                    else self._stepper_module.FORWARD
-                )
-                # Odometry tracks logical direction (vR), not flipped hardware direction
-                step_delta_R = 1 if vR >= 0 else -1
+                direction_R = 1 if vR >= 0 else 0
+
+                # Set direction pin
+                gpio_manager.output(PINS.RIGHT_DIR, direction_R)
+
+                # Generate step pulses
                 while now >= next_right and self.running:
-                    try:
-                        self.right_stepper.onestep(
-                            direction=direction_R, style=self.step_style
-                        )
-                        with self.lock:
-                            self.steps_right += step_delta_R
-                            self._right_engaged = True
-                        next_right += period_R
-                    except Exception as exc:  # pragma: no cover - hardware path
-                        self.logger.warning(
-                            "Right stepper onestep failed: %s", exc, exc_info=False
-                        )
-                        next_right = time.perf_counter() + self._I2C_ERROR_SLEEP_S
-                        time.sleep(self._I2C_ERROR_SLEEP_S)
-                        break
+                    # Generate step pulse with precise timing
+                    gpio_manager.output(PINS.RIGHT_STEP, 1)
+                    self._busy_wait(self._STEP_PULSE_WIDTH_S)
+                    gpio_manager.output(PINS.RIGHT_STEP, 0)
+
+                    # Update odometry
+                    step_delta = 1 if vR >= 0 else -1
+                    with self.lock:
+                        self.steps_right += step_delta
+
+                    next_right += period_R
                     now = time.perf_counter()
+
+                    # Don't accumulate too many steps at once
                     if next_right - now > period_R:
                         break
             else:
                 next_right = now
-                if self.release_on_idle:
-                    with self.lock:
-                        if self._right_engaged:
-                            self.right_stepper.release()
-                            self._right_engaged = False
 
+            # Small sleep to prevent CPU spinning
             time.sleep(self._LOOP_SLEEP_S)
+
+            # Handle idle release if enabled
+            if self.release_on_idle:
+                with self.lock:
+                    vL_check = self.vL_current
+                    vR_check = self.vR_current
+                
+                rate_L_check = abs(vL_check) * self.steps_per_m_effective
+                rate_R_check = abs(vR_check) * self.steps_per_m_effective
+                
+                if rate_L_check == 0.0 and self._left_enabled:
+                    self._disable_left()
+                elif rate_L_check > 0.0 and not self._left_enabled:
+                    self._enable_left()
+
+                if rate_R_check == 0.0 and self._right_enabled:
+                    self._disable_right()
+                elif rate_R_check > 0.0 and not self._right_enabled:
+                    self._enable_right()
+
+    def _enable_left(self):
+        """Enable left motor driver."""
+        gpio_manager.output(PINS.LEFT_ENABLE, 0)  # Active low
+        self._left_enabled = True
+
+    def _disable_left(self):
+        """Disable left motor driver."""
+        gpio_manager.output(PINS.LEFT_ENABLE, 1)  # Active low
+        self._left_enabled = False
+
+    def _enable_right(self):
+        """Enable right motor driver."""
+        gpio_manager.output(PINS.RIGHT_ENABLE, 0)  # Active low
+        self._right_enabled = True
+
+    def _disable_right(self):
+        """Disable right motor driver."""
+        gpio_manager.output(PINS.RIGHT_ENABLE, 1)  # Active low
+        self._right_enabled = False
 
     def stop(self):
         """Emergency stop - zero all velocities."""
@@ -321,14 +336,11 @@ class StepperDrive:
             self.disable_drivers()
 
     def enable_drivers(self):
-        """Ensure both stepper channels are ready to energize."""
-        # MotorKit energizes coils on demand; no explicit action required.
-        self._left_engaged = False
-        self._right_engaged = False
+        """Enable both stepper drivers."""
+        self._enable_left()
+        self._enable_right()
 
     def disable_drivers(self):
-        """Release both motors to save power."""
-        self.left_stepper.release()
-        self.right_stepper.release()
-        self._left_engaged = False
-        self._right_engaged = False
+        """Disable both stepper drivers to save power."""
+        self._disable_left()
+        self._disable_right()

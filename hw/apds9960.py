@@ -45,11 +45,11 @@ class APDS9960:
         time.sleep(0.01)
 
         # Configure proximity detection
-        # PDRIVE = 100mA, PGAIN = 4x
+        # PDRIVE = 100mA, PGAIN = 8x
         self.bus.write_byte_data(self.address, APDS9960_CONTROL, 0x2C)
 
-        # Proximity pulse: 8 pulses, 16us length
-        self.bus.write_byte_data(self.address, APDS9960_PPULSE, 0x87)
+        # Proximity pulse: 16 pulses, 16us length (stronger signal)
+        self.bus.write_byte_data(self.address, APDS9960_PPULSE, 0x8F)
 
         # Enable proximity detection
         enable = self.bus.read_byte_data(self.address, APDS9960_ENABLE)
@@ -74,7 +74,11 @@ class APDS9960:
             Normalized proximity 0.0-1.0 (0=far, 1=near)
         """
         raw = self.read_proximity_raw()
-        normalized = (raw - self.calibration_offset) * self.calibration_scale
+        # If not calibrated (default offset=0, scale=1), fall back to raw/255.0
+        if self.calibration_offset == 0.0 and self.calibration_scale == 1.0:
+            normalized = raw / 255.0
+        else:
+            normalized = (raw - self.calibration_offset) * self.calibration_scale
         return np.clip(normalized, 0.0, 1.0)
 
     def calibrate(self, on_table_samples: int = 20, off_table_samples: int = 20):
