@@ -235,9 +235,9 @@ class ProximityViewer(QtWidgets.QMainWindow):
         self.plot = pg.PlotWidget()
         self.plot.setYRange(0.0, 1.05, padding=0)
         self.plot.showGrid(x=True, y=True, alpha=0.2)
-        self.plot.setLabel("left", "Normalized proximity", units="arb")
+        self.plot.setLabel("left", "Raw proximity (scaled)", units="arb")
         self.plot.setLabel("bottom", "Sensors")
-        self.plot.setTitle("Live proximity (1.0 = near)")
+        self.plot.setTitle("Live raw proximity (1.0 = near)")
         layout.addWidget(self.plot, stretch=3)
 
         ticks = [(i, label) for i, label in enumerate(self.sensor_labels)]
@@ -307,19 +307,13 @@ class ProximityViewer(QtWidgets.QMainWindow):
         heights: List[float] = []
         parts = []
         for label, value, raw_value in zip(self.sensor_labels, readings, raw_readings):
-            if value is None or not math.isfinite(value):
+            if raw_value is None or (isinstance(raw_value, float) and not math.isfinite(raw_value)):
                 heights.append(0.0)
-                if raw_value is not None:
-                    parts.append(f"{label}=-- (raw:{raw_value})")
-                else:
-                    parts.append(f"{label}=-- (raw:--)")
+                parts.append(f"{label}=-- (raw:--)")
             else:
-                clamped = max(0.0, min(1.0, float(value)))
+                clamped = max(0.0, min(1.0, float(raw_value) / 255.0))
                 heights.append(clamped)
-                if raw_value is not None:
-                    parts.append(f"{label}={clamped:0.2f} (raw:{raw_value})")
-                else:
-                    parts.append(f"{label}={clamped:0.2f} (raw:--)")
+                parts.append(f"{label}=raw:{int(raw_value)}")
 
         self.bars.setOpts(height=heights)
         self.status_label.setText("  |  ".join(parts))
