@@ -82,9 +82,12 @@ class ProximityRig:
             sensor: Optional[APDS9960]
             try:
                 self.mux.select(ch)
-                time.sleep(0.01)
+                # Conservative settle time after MUX channel switch (20ms)
+                time.sleep(0.020)
                 sensor = APDS9960(self.bus, sensor_address)
                 sensor.init()
+                # Brief delay after initialization
+                time.sleep(0.010)
             except Exception as exc:
                 print(
                     f"Warning: failed to init proximity sensor on channel {ch}: {exc}"
@@ -134,8 +137,11 @@ class ProximityRig:
 
             try:
                 self.mux.select(ch)
-                time.sleep(0.002)
+                # Conservative settle time after MUX channel switch (20ms)
+                time.sleep(0.020)
                 raw = sensor.read_proximity_raw()
+                # Small delay between raw and normalized reads
+                time.sleep(0.005)
                 reading = sensor.read_proximity_norm()
                 raw_values.append(raw)
             except Exception as exc:
@@ -420,7 +426,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 continue
             try:
                 rig.mux.select(ch)
-                time.sleep(0.01)
+                # Conservative settle time before calibration (20ms)
+                time.sleep(0.020)
                 print(f"\nCalibrating sensor on channel {ch}:")
                 sensor.calibrate(on_table_samples=10, off_table_samples=10)
             except Exception as exc:

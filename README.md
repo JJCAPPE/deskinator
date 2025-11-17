@@ -1,4 +1,4 @@
-# Executive Summary  
+# Executive Summary
 Deskinator performs safe tabletop cleaning by fusing sensors, inferring boundaries, and executing coverage paths. Three async loops read sensors, build a map, and command motion. The system uses robust edge detection, rectangle inference, and boustrophedon planning to clean efficiently.
 
 - Sense: Read APDS9960 proximity via TCA9548A, IMU yaw rate, and stepper odometry.

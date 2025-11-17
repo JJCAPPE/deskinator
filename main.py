@@ -81,8 +81,12 @@ class Deskinator:
         self.sensors = []
         for i, chan in enumerate(I2C.MUX_CHANS):
             self.mux.select(chan)
+            # Conservative settle time after MUX channel switch (20ms)
+            time.sleep(0.020)
             sensor = APDS9960(self.i2c, I2C.APDS_ADDR)
             sensor.init()
+            # Brief delay after initialization
+            time.sleep(0.010)
             self.sensors.append(sensor)
             print(f"  APDS9960 #{i} on MUX channel {chan}")
 
@@ -242,9 +246,11 @@ class Deskinator:
             sensor_readings = []
             for i, sensor in enumerate(self.sensors):
                 self.mux.select(I2C.MUX_CHANS[i])
-                # Allow brief settle time after switching MUX channel
-                time.sleep(0.002)
+                # Conservative settle time after switching MUX channel (20ms)
+                time.sleep(0.020)
                 reading = sensor.read_proximity_norm()
+                # Small delay after read to ensure I2C transaction completes
+                time.sleep(0.005)
                 sensor_readings.append(reading)
 
             self.mux.select(None)
