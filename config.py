@@ -11,12 +11,13 @@ from dataclasses import dataclass
 class Pins:
     """GPIO pin assignments for Raspberry Pi."""
 
-    RIGHT_STEP: int = 22  # Driver Right Step GPIO22
-    RIGHT_DIR: int = 23  # Driver Right Dir  GPIO23
-    RIGHT_ENABLE: int = 27  # Driver Right Enable GPIO27
-    LEFT_DIR: int = 21  # Driver Left  Dir  GPIO21
-    LEFT_STEP: int = 20  # Driver Left  Step GPIO20
-    LEFT_ENABLE: int = 16  # Driver Left  Enable GPIO16
+    # Swapped: physical left wheel is on RIGHT pins, physical right wheel is on LEFT pins
+    RIGHT_STEP: int = 20  # Driver Right Step GPIO20 (controls physical left wheel)
+    RIGHT_DIR: int = 21  # Driver Right Dir  GPIO21 (controls physical left wheel)
+    RIGHT_ENABLE: int = 16  # Driver Right Enable GPIO16 (controls physical left wheel)
+    LEFT_DIR: int = 23  # Driver Left  Dir  GPIO23 (controls physical right wheel)
+    LEFT_STEP: int = 22  # Driver Left  Step GPIO22 (controls physical right wheel)
+    LEFT_ENABLE: int = 27  # Driver Left  Enable GPIO27 (controls physical right wheel)
     VACUUM_PWM: int = 5  # Vacuum MOSFET     GPIO5
     BUZZER: int = 12  # Buzzer/Beeper      GPIO12
     # Gesture sensor I2C (separate bus or software I2C)

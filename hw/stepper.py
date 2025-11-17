@@ -123,15 +123,23 @@ class StepperDrive:
             vL_target = v - 0.5 * omega * GEOM.WHEEL_BASE
             vR_target = v + 0.5 * omega * GEOM.WHEEL_BASE
 
+            # Invert right wheel direction: RIGHT pins control physical left wheel
+            # which has reversed direction
+            vR_target = -vR_target
+
             max_wheel = self._max_wheel_speed
             self.vL_target = np.clip(vL_target, -max_wheel, max_wheel)
             self.vR_target = np.clip(vR_target, -max_wheel, max_wheel)
 
             # Store the achievable chassis velocities corresponding to the
-            # clipped wheel targets. This keeps downstream consumers aware of
-            # any saturation we applied.
-            self.v_cmd = 0.5 * (self.vL_target + self.vR_target)
-            self.omega_cmd = (self.vR_target - self.vL_target) / GEOM.WHEEL_BASE
+            # clipped wheel targets. After pin swap and direction inversion:
+            # - LEFT pins (vL_target) control physical right wheel
+            # - RIGHT pins (vR_target, inverted) control physical left wheel
+            # Physical left = -vR_target, Physical right = vL_target
+            physical_left = -self.vR_target
+            physical_right = self.vL_target
+            self.v_cmd = 0.5 * (physical_left + physical_right)
+            self.omega_cmd = (physical_right - physical_left) / GEOM.WHEEL_BASE
 
     def update(self, dt: float) -> tuple[float, float]:
         """
@@ -158,15 +166,21 @@ class StepperDrive:
             self.vR_current = np.clip(self.vR_current, -max_wheel, max_wheel)
 
             # Calculate distances using the instantaneous velocity estimate.
-            dSL = self.vL_current * dt
-            dSR = self.vR_current * dt
+            # After pin swap and direction inversion, swap and negate to get
+            # physical wheel distances
+            dSL_physical = -self.vR_current * dt  # Physical left wheel
+            dSR_physical = self.vL_current * dt    # Physical right wheel
 
-            return dSL, dSR
+            return dSL_physical, dSR_physical
 
     def read_odometry(self) -> tuple[float, float]:
         """
         Read odometry since last call.
         Returns (dSL, dSR) in meters.
+        
+        Note: After pin swap, LEFT pins control physical right wheel,
+        and RIGHT pins control physical left wheel. We swap and negate
+        to return correct values for physical left/right wheels.
         """
         with self.lock:
             dSteps_L = self.steps_left - self.last_steps_left
@@ -175,10 +189,13 @@ class StepperDrive:
             self.last_steps_left = self.steps_left
             self.last_steps_right = self.steps_right
 
-            dSL = dSteps_L / self.steps_per_m_effective
-            dSR = dSteps_R / self.steps_per_m_effective
+            # After pin swap: LEFT pins = physical right, RIGHT pins = physical left
+            # After direction inversion: RIGHT pins have inverted step counting
+            # So we swap and negate RIGHT to get physical left wheel distance
+            dSL_physical = -dSteps_R / self.steps_per_m_effective  # Physical left wheel
+            dSR_physical = dSteps_L / self.steps_per_m_effective   # Physical right wheel
 
-            return dSL, dSR
+            return dSL_physical, dSR_physical
 
     @property
     def step_style_name(self) -> str:
