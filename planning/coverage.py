@@ -141,8 +141,18 @@ class CoveragePlanner:
         return lane[self.current_waypoint_idx]
 
     def advance_waypoint(self):
-        """Advance to next waypoint."""
+        """Advance to next waypoint, moving to next lane if current lane is complete."""
+        if not self.lanes or self.current_lane_idx >= len(self.lanes):
+            return
+        
         self.current_waypoint_idx += 1
+        
+        # Check if we've completed the current lane
+        current_lane = self.lanes[self.current_lane_idx]
+        if self.current_waypoint_idx >= len(current_lane):
+            # Move to next lane
+            self.current_lane_idx += 1
+            self.current_waypoint_idx = 0
 
     def get_current_lane(self) -> Optional[List[Tuple[float, float]]]:
         """

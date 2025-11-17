@@ -428,13 +428,14 @@ class Deskinator:
             else:
                 # Update FSM
                 context = {
-                    "start_signal": True,  # Change to self.start_signal
+                    "start_signal": self.start_signal,
                     "rectangle_confident": self.fsm.rectangle_confident,
                     "coverage_ratio": (
                         self.swept_map.coverage_ratio(self.rect_fit.get_rectangle())
                         if self.rect_fit.is_confident
                         else 0.0
                     ),
+                    "coverage_planner_complete": self.coverage_planner.is_complete(),
                     "error": False,
                 }
 
@@ -457,13 +458,21 @@ class Deskinator:
                             pose, lane, self.swept_map
                         )
 
-                        # Check if lane complete
+                        # Check if current lane is complete
                         if self.motion.is_path_complete():
+                            # Advance to next waypoint (which may advance to next lane)
                             self.coverage_planner.advance_waypoint()
                             self.motion.reset_path_progress()
+                            
+                            # Check if all lanes are complete
+                            if self.coverage_planner.is_complete():
+                                print("[Coverage] All lanes complete")
                     else:
+                        # No more lanes available
                         v_cmd, omega_cmd = 0.0, 0.0
                         self.motion.reset_path_progress()
+                        if self.coverage_planner.is_complete():
+                            print("[Coverage] Coverage planner reports complete")
 
                 elif state == RobotState.DONE:
                     v_cmd, omega_cmd = 0.0, 0.0
@@ -546,7 +555,7 @@ class Deskinator:
         """Run main control loops."""
         self.running = True
 
-        # Turn on vacuum
+        # Turn on vacuum after gesture start
         print("[Main] Starting vacuum")
         self.vacuum.on(duty=0.8)
 

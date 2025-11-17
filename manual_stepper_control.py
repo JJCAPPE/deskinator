@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Interactive keyboard drive utility for the Adafruit Stepper Motor HAT.
+"""Interactive keyboard drive utility for A4988 stepper motor drivers.
 
-This script is intentionally lightweight so you can confirm the hardware
-stack works end-to-end.  Use the WASD keys (plus Q/E) to jog the robot and
-SPACE to hold position. Press X or CTRL+C to exit.  The default stepping
-rate is conservative (100 steps/s) to stay within what the HAT can deliver
-reliably over I2C while running from Python.
+This script provides manual control of the robot using keyboard input.
+Use the WASD keys (plus Q/E/Z/C) to jog the robot and SPACE to stop.
+Press X or CTRL+C to exit.
+
+The robot uses A4988 stepper drivers controlled via GPIO pins with
+microstepping for smooth motion.
 
 Example usage:
 
-    python3 manual_stepper_control.py --rate 120 --style interleave
+    python3 manual_stepper_control.py --speed 0.10 --max-speed 0.18
 
 """
 
@@ -23,20 +24,14 @@ import tty
 from select import select
 from typing import Optional
 
-
-def _load_hat():
-    """Import MotorKit + stepper modules with a nice error if missing."""
-
-    try:
-        import adafruit_motor.stepper as stepper_mod  # type: ignore
-        from adafruit_motorkit import MotorKit  # type: ignore
-    except ImportError as exc:  # pragma: no cover - hardware dependency
-        raise SystemExit(
-            "This utility requires the Adafruit MotorKit libraries. "
-            "Install with 'pip3 install adafruit-circuitpython-motorkit'."
-        ) from exc
-
-    return MotorKit, stepper_mod
+try:
+    from hw.stepper import StepperDrive
+    from config import GEOM, LIMS
+except ImportError as exc:
+    raise SystemExit(
+        "Failed to import required modules. Make sure you're running from "
+        "the project root directory."
+    ) from exc
 
 
 class RawTerminal:
@@ -58,7 +53,7 @@ class RawTerminal:
 
 
 class KeyboardStepper:
-    """Minimal keyboard-based jog controller."""
+    """Minimal keyboard-based jog controller using velocity commands."""
 
     PROMPT = """
 Controls:
@@ -70,12 +65,12 @@ Controls:
   z : left wheel backward
   e : right wheel forward
   c : right wheel backward
-  space : hold position (stop stepping)
+  space : stop (zero velocity)
   x : exit
 
 Speed tweaks:
-  + / = : increase step rate
-  - / _ : decrease step rate
+  + / = : increase speed
+  - / _ : decrease speed
   ? / h : show this help
 
 Press keys repeatedly or hold them; the last pressed command continues
@@ -83,62 +78,53 @@ until another command is given or STOP (space) is pressed.
 """
 
     COMMANDS = {
-        "w": (+1, +1),
-        "s": (-1, -1),
-        "a": (-1, +1),
-        "d": (+1, -1),
-        "q": (+1, 0),
-        "z": (-1, 0),
-        "e": (0, +1),
-        "c": (0, -1),
+        "w": (+1, 0),  # Forward (v > 0, omega = 0)
+        "s": (-1, 0),  # Backward (v < 0, omega = 0)
+        "a": (0, +1),  # Pivot left (v = 0, omega > 0)
+        "d": (0, -1),  # Pivot right (v = 0, omega < 0)
+        "q": (+1, -1),  # Left forward (turn right)
+        "z": (-1, +1),  # Left backward (turn left)
+        "e": (+1, +1),  # Right forward (turn left)
+        "c": (-1, -1),  # Right backward (turn right)
     }
 
     def __init__(
         self,
-        kit,
-        stepper_module,
+        stepper: StepperDrive,
         *,
-        step_style,
-        base_rate: float,
-        rate_step: float,
-        max_rate: float,
-        release_on_exit: bool,
+        base_speed: float,
+        speed_step: float,
+        max_speed: float,
     ):
-        self._kit = kit
-        self._stepper_module = stepper_module
-        self._step_style = step_style
-        self._release_on_exit = release_on_exit
+        self._stepper = stepper
+        self._base_speed = base_speed
+        self._speed_step = speed_step
+        self._max_speed = max_speed
+        self._min_speed = 0.01
 
-        # Hardware wiring: physical LEFT motor is on MotorKit.stepper2 and the
-        # physical RIGHT motor is on MotorKit.stepper1. Map them accordingly so
-        # the software directions match the robot's frame.
-        self._left = getattr(kit, "stepper2", None)
-        self._right = getattr(kit, "stepper1", None)
-        if self._left is None or self._right is None:
-            raise SystemExit(
-                "MotorKit did not report both stepper1 and stepper2. "
-                "Check hardware wiring."
-            )
+        # Angular speed for pivoting (fixed, independent of linear speed)
+        self._omega_speed = LIMS.OMEGA_MAX * 0.5  # Use 50% of max for pivoting
 
-        self._min_rate = 30.0
-        self._max_rate = max(self._min_rate, max_rate)
-        self._rate_step = max(1.0, rate_step)
-        self._rate = self._clip_rate(base_rate)
-        self._period = self._rate_to_period(self._rate)
+        # Current command multipliers (-1, 0, or +1 for v and omega)
+        self._v_mult = 0
+        self._omega_mult = 0
 
-        self._left_dir = 0
-        self._right_dir = 0
+        # Current speed setting (0 to max_speed)
+        self._speed = self._clip_speed(base_speed)
 
     def run(self):
         """Main interactive loop."""
 
         self._print_banner()
 
-        next_step = time.monotonic()
+        # Control loop runs at ~50 Hz for smooth motion
+        dt = 0.02
+        next_update = time.monotonic()
+
         try:
             with RawTerminal(sys.stdin):
                 while True:
-                    timeout = max(0.0, next_step - time.monotonic())
+                    timeout = max(0.0, next_update - time.monotonic())
                     key = self._read_key(timeout)
 
                     if key:
@@ -150,35 +136,31 @@ until another command is given or STOP (space) is pressed.
                             self._set_command(0, 0)
                             continue
                         if key in {"+", "="}:
-                            if self._adjust_rate(self._rate_step):
-                                next_step = time.monotonic() + self._period
+                            self._adjust_speed(self._speed_step)
                             continue
                         if key in {"-", "_"}:
-                            if self._adjust_rate(-self._rate_step):
-                                next_step = time.monotonic() + self._period
+                            self._adjust_speed(-self._speed_step)
                             continue
                         if key in {"?", "h"}:
                             self._show_help()
                             continue
-                        dirs = self.COMMANDS.get(key)
-                        if dirs:
-                            self._set_command(*dirs)
+                        cmd = self.COMMANDS.get(key)
+                        if cmd:
+                            self._set_command(*cmd)
                         else:
                             print(f"\nUnmapped key: {repr(key)}")
 
+                    # Update stepper control
                     now = time.monotonic()
-                    while now >= next_step:
-                        self._step_once()
-                        next_step += self._period
-                        now = time.monotonic()
+                    if now >= next_update:
+                        self._update_stepper()
+                        next_update = now + dt
+
         except KeyboardInterrupt:
             print("\nInterrupted by user")
         finally:
-            if self._release_on_exit:
-                self._release()
-
-    def _rate_to_period(self, rate: float) -> float:
-        return 1.0 / rate if rate > 0 else 0.01
+            self._stepper.stop()
+            self._stepper.stop_pulse_generation()
 
     def _read_key(self, timeout: float) -> Optional[str]:
         rlist, _, _ = select([sys.stdin], [], [], timeout)
@@ -186,166 +168,124 @@ until another command is given or STOP (space) is pressed.
             return sys.stdin.read(1)
         return None
 
-    def _set_command(self, left_dir: int, right_dir: int):
-        self._left_dir = int(left_dir)
-        self._right_dir = int(right_dir)
+    def _set_command(self, v_mult: int, omega_mult: int):
+        """Set velocity command multipliers."""
+        self._v_mult = int(v_mult)
+        self._omega_mult = int(omega_mult)
         print(
-            f"\rLeft: {self._dir_label(self._left_dir)} | "
-            f"Right: {self._dir_label(self._right_dir)}",
+            f"\rV: {self._dir_label(self._v_mult)} | "
+            f"Omega: {self._dir_label(self._omega_mult)} | "
+            f"Speed: {self._speed:.3f} m/s",
             end="",
             flush=True,
         )
 
-    def _dir_label(self, direction: int) -> str:
-        if direction > 0:
+    def _dir_label(self, multiplier: int) -> str:
+        if multiplier > 0:
             return "forward"
-        if direction < 0:
+        if multiplier < 0:
             return "backward"
         return "stop"
 
-    def _adjust_rate(self, delta: float) -> bool:
+    def _adjust_speed(self, delta: float):
+        """Adjust base speed setting."""
         if delta == 0.0:
-            return False
-        new_rate = self._clip_rate(self._rate + delta)
-        if abs(new_rate - self._rate) < 1e-6:
-            print(f"\nStep rate already at limit ({self._rate:.0f} steps/s).")
-            return False
-        self._rate = new_rate
-        self._period = self._rate_to_period(self._rate)
-        print(f"\nStep rate -> {self._rate:.0f} steps/s")
-        return True
+            return
+        new_speed = self._clip_speed(self._speed + delta)
+        if abs(new_speed - self._speed) < 1e-6:
+            print(
+                f"\nSpeed already at limit ({self._speed:.3f} m/s)."
+            )
+            return
+        self._speed = new_speed
+        print(f"\nSpeed -> {self._speed:.3f} m/s (max: {self._max_speed:.3f} m/s)")
 
-    def _clip_rate(self, rate: float) -> float:
-        return max(self._min_rate, min(self._max_rate, rate))
+    def _clip_speed(self, speed: float) -> float:
+        """Clip speed to valid range."""
+        return max(self._min_speed, min(self._max_speed, speed))
+
+    def _update_stepper(self):
+        """Update stepper drive with current velocity command."""
+        # Calculate commanded velocities
+        v_cmd = self._v_mult * self._speed
+        # Use fixed angular speed for pivoting (independent of linear speed)
+        omega_cmd = self._omega_mult * self._omega_speed
+
+        # Send command to stepper
+        self._stepper.command(v_cmd, omega_cmd)
+
+        # Update internal state (needed for acceleration ramping)
+        self._stepper.update(0.02)
 
     def _show_help(self):
         print("\n" + self.PROMPT + "\n")
 
-    def _step_once(self):
-        if self._left_dir:
-            self._do_step(self._left, self._left_dir)
-        if self._right_dir:
-            # Wiring flips the right wheel direction relative to the logical
-            # command orientation, so negate here.
-            self._do_step(self._right, -self._right_dir)
-
-    def _do_step(self, motor, direction: int):
-        try:
-            motor.onestep(
-                direction=(
-                    self._stepper_module.FORWARD
-                    if direction > 0
-                    else self._stepper_module.BACKWARD
-                ),
-                style=self._step_style,
-            )
-        except Exception as exc:  # pragma: no cover - hardware path
-            print(f"\nStepper I2C error: {exc}")
-            time.sleep(0.05)
-
-    def _release(self):
-        try:
-            self._left.release()
-        except Exception:
-            pass
-        try:
-            self._right.release()
-        except Exception:
-            pass
-
     def _print_banner(self):
-        style_name = self._style_name(self._step_style)
         print("=" * 60)
-        print("  Adafruit Stepper HAT keyboard controller")
-        print(f"  Step style: {style_name}")
+        print("  A4988 Stepper Driver keyboard controller")
+        print(f"  Step style: {self._stepper.step_style_name}")
         print(
-            f"  Step rate: {self._rate:.0f} steps/s per motor "
-            f"(limits {self._min_rate:.0f}-{self._max_rate:.0f})"
+            f"  Base speed: {self._speed:.3f} m/s "
+            f"(limits {self._min_speed:.3f}-{self._max_speed:.3f})"
         )
+        print(f"  Max linear velocity: {LIMS.V_MAX:.3f} m/s")
+        print(f"  Max angular velocity: {LIMS.OMEGA_MAX:.3f} rad/s")
         print("  Press X or CTRL+C to exit.")
         print("=" * 60)
         print(self.PROMPT)
-
-    def _style_name(self, style_code: int) -> str:
-        mapping = {
-            getattr(self._stepper_module, "SINGLE", None): "SINGLE",
-            getattr(self._stepper_module, "DOUBLE", None): "DOUBLE",
-            getattr(self._stepper_module, "INTERLEAVE", None): "INTERLEAVE",
-            getattr(self._stepper_module, "MICROSTEP", None): "MICROSTEP",
-        }
-        return mapping.get(style_code, f"0x{style_code:02X}")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--rate",
+        "--speed",
         type=float,
-        default=320.0,
-        help="Initial steps per second per motor (default: 320).",
+        default=0.10,
+        help="Initial linear speed in m/s (default: 0.10).",
     )
     parser.add_argument(
-        "--max-rate",
+        "--max-speed",
         type=float,
-        default=720.0,
-        help="Maximum allowable step rate (default: 720).",
+        default=None,
+        help=f"Maximum linear speed in m/s (default: {LIMS.V_MAX:.3f} from config).",
     )
     parser.add_argument(
-        "--rate-step",
+        "--speed-step",
         type=float,
-        default=40.0,
-        help="Step rate increment/decrement for +/- keys (default: 40).",
-    )
-    parser.add_argument(
-        "--style",
-        choices=["single", "double", "interleave", "microstep"],
-        default="interleave",
-        help="Stepper style to use (default: interleave).",
+        default=0.02,
+        help="Speed increment/decrement for +/- keys in m/s (default: 0.02).",
     )
     parser.add_argument(
         "--hold",
         action="store_true",
-        help="Keep coils energized on exit (default releases).",
+        help="Keep drivers enabled on exit (default disables).",
     )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    MotorKit, stepper_module = _load_hat()
 
-    style_lookup = {
-        "single": stepper_module.SINGLE,
-        "double": stepper_module.DOUBLE,
-        "interleave": stepper_module.INTERLEAVE,
-    }
-    if hasattr(stepper_module, "MICROSTEP"):
-        style_lookup["microstep"] = stepper_module.MICROSTEP
-    else:
-        style_lookup.pop("microstep", None)
-        if args.style == "microstep":
-            raise SystemExit("Microstepping not supported by this library build.")
+    max_speed = args.max_speed if args.max_speed is not None else LIMS.V_MAX
+    max_speed = max(0.01, min(max_speed, LIMS.V_MAX))
+    speed_step = max(0.01, args.speed_step)
+    base_speed = max(0.01, min(max_speed, args.speed))
+
+    # Initialize stepper drive
+    stepper = StepperDrive(release_on_idle=not args.hold)
 
     try:
-        step_style = style_lookup[args.style]
-    except KeyError as exc:  # pragma: no cover - should not happen with choices
-        raise SystemExit(f"Unsupported style: {args.style}") from exc
-
-    max_rate = max(60.0, args.max_rate)
-    rate_step = max(5.0, args.rate_step)
-    base_rate = max(30.0, min(max_rate, args.rate))
-
-    kit = MotorKit()
-    controller = KeyboardStepper(
-        kit,
-        stepper_module,
-        step_style=step_style,
-        base_rate=base_rate,
-        rate_step=rate_step,
-        max_rate=max_rate,
-        release_on_exit=not args.hold,
-    )
-    controller.run()
+        controller = KeyboardStepper(
+            stepper,
+            base_speed=base_speed,
+            speed_step=speed_step,
+            max_speed=max_speed,
+        )
+        controller.run()
+    finally:
+        # Ensure cleanup
+        stepper.stop()
+        stepper.stop_pulse_generation()
 
 
 if __name__ == "__main__":

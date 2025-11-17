@@ -46,6 +46,7 @@ class SupervisorFSM:
                 - 'start_signal': bool, user start signal
                 - 'rectangle_confident': bool, rectangle fit is confident
                 - 'coverage_ratio': float, coverage completion ratio
+                - 'coverage_planner_complete': bool, all coverage lanes completed
                 - 'error': bool, error condition
 
         Returns:
@@ -89,10 +90,16 @@ class SupervisorFSM:
 
             # Check if coverage is complete
             coverage_ratio = context.get("coverage_ratio", 0.0)
-            if coverage_ratio >= 0.97:
+            coverage_planner_complete = context.get("coverage_planner_complete", False)
+            
+            # Complete if coverage ratio is high OR all lanes are traversed
+            if coverage_ratio >= 0.97 or coverage_planner_complete:
                 self.coverage_complete = True
                 self.state = RobotState.DONE
-                print(f"[FSM] Coverage complete ({coverage_ratio:.1%})")
+                if coverage_planner_complete:
+                    print(f"[FSM] Coverage complete - all lanes traversed ({coverage_ratio:.1%} coverage ratio)")
+                else:
+                    print(f"[FSM] Coverage complete ({coverage_ratio:.1%})")
 
         elif self.state == RobotState.DONE:
             # Stay in DONE state
