@@ -29,12 +29,13 @@ class Pins:
 class I2CParams:
     """I2C bus configuration and device addresses."""
 
-    BUS: int = 1  # Main I2C bus for sensors/IMU
-    GESTURE_BUS: int = 3  # I2C bus for gesture sensor (or use software I2C)
+    BUS: int = 1  # Main I2C bus for mux and sensors (hardware I2C)
+    IMU_BUS: int = 5  # I2C bus for IMU (software I2C on GPIO 6/13)
+    GESTURE_BUS: int = 3  # I2C bus for gesture sensor (software I2C on GPIO 15/14)
     ADDR_IMU: int | None = 0x68  # MPU-6050 detected (AD0 low)
     ADDR_MUX: int = 0x70  # TCA9548A detected
     APDS_ADDR: int = 0x39  # APDS9960 default
-    GESTURE_ADDR: int = 0x29  # Gesture APDS9960 (on separate bus)
+    GESTURE_ADDR: int = 0x39  # Gesture APDS9960 (on separate bus)
     MUX_CHANS: tuple[int, int, int, int] = (
         0,
         1,

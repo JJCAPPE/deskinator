@@ -67,6 +67,7 @@ class ProximityRig:
         gesture_bus: int,
         gesture_address: int,
         imu_address: Optional[int] = None,
+        imu_bus: Optional[int] = None,
     ) -> None:
         self.bus = I2CBus(bus_number)
         self.mux = TCA9548A(self.bus, mux_address)
@@ -110,7 +111,9 @@ class ProximityRig:
             self.imu: Optional[MPU6050] = None
         else:
             try:
-                self.imu = MPU6050(self.bus, imu_address)
+                # Use separate bus for IMU if provided, otherwise use main bus (backward compat)
+                imu_bus_instance = I2CBus(imu_bus) if imu_bus is not None else self.bus
+                self.imu = MPU6050(imu_bus_instance, imu_address)
             except Exception as exc:
                 print(
                     f"Warning: failed to init IMU at address 0x{imu_address:02x}: {exc}"
@@ -418,6 +421,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             gesture_bus=args.gesture_bus,
             gesture_address=args.gesture_addr,
             imu_address=args.imu_addr,
+            imu_bus=I2C.IMU_BUS,
         )
         print("\nStarting APDS calibration (place over table, then off edge when prompted)...")
         for ch, sensor in zip(rig.mux_channels, rig.sensors):

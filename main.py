@@ -74,6 +74,7 @@ class Deskinator:
             print(f"[Init] Warning: Gesture sensor unavailable ({e})")
 
         # I2C devices
+        # Main bus for mux and sensors (bus 1 - hardware I2C)
         self.i2c = I2CBus(I2C.BUS)
         self.mux = TCA9548A(self.i2c, I2C.ADDR_MUX)
 
@@ -92,8 +93,9 @@ class Deskinator:
 
         self.mux.select(None)
 
-        # IMU
-        self.imu = MPU6050(self.i2c, I2C.ADDR_IMU or 0x68)
+        # IMU on separate bus (bus 5 - software I2C) to avoid interference with mux
+        self.imu_i2c = I2CBus(I2C.IMU_BUS)
+        self.imu = MPU6050(self.imu_i2c, I2C.ADDR_IMU or 0x68)
         if getattr(self.imu, "sim_mode", False):
             print("  MPU-6050 IMU in simulation mode")
         else:

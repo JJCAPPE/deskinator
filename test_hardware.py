@@ -480,9 +480,11 @@ def main():
         print_warn("Skipping proximity sensor tests (multiplexer failed)")
         results["APDS9960 Sensors"] = False
 
-    # Test IMU
-    imu_ok = test_imu(bus)
+    # Test IMU (on separate bus 5)
+    imu_bus = I2CBus(I2C_CONFIG.IMU_BUS)
+    imu_ok = test_imu(imu_bus)
     results["MPU-6050 IMU"] = imu_ok
+    imu_bus.close()
 
     # Test stepper motors
     stepper_ok = test_stepper_motors()
