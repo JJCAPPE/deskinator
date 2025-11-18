@@ -8,7 +8,7 @@ you determine the correct addresses for config.py.
 Run this after wiring your I2C devices to find:
 - MPU-6050 IMU address
 - TCA9548A multiplexer address (should be 0x70)
-- APDS9960 proximity sensors through each MUX channel
+- APDS9960 proximity sensors (2 front-facing sensors)
 """
 
 import sys
@@ -165,7 +165,7 @@ def generate_config_suggestions(
     print_header("CONFIGURATION SUGGESTIONS")
 
     # Find IMU
-    imu_candidates = [addr for addr in main_devices if addr in [0x29, 0x4A, 0x4B]]
+    imu_candidates = [addr for addr in main_devices if addr in [0x68, 0x69]]
 
     # Find APDS9960 sensors
     apds_channels = []
@@ -205,17 +205,17 @@ def generate_config_suggestions(
     print(f"APDS_ADDR: int = 0x39  # APDS9960 standard address")
 
     if apds_channels:
-        if len(apds_channels) == 4:
+        if len(apds_channels) == 2:
             print(
-                f"{Colors.GREEN}MUX_CHANS: tuple[int, int, int, int] = {tuple(apds_channels)}{Colors.END}  # All 4 sensors detected"
+                f"{Colors.GREEN}MUX_CHANS: tuple[int, int] = {tuple(apds_channels)}{Colors.END}  # Both sensors detected"
             )
         else:
             print(
-                f"{Colors.YELLOW}MUX_CHANS: tuple[int, int, int, int] = {tuple(apds_channels + [0] * (4 - len(apds_channels)))}{Colors.END}  # Only {len(apds_channels)}/4 sensors detected"
+                f"{Colors.YELLOW}MUX_CHANS: tuple[int, int] = {tuple(apds_channels[:2] if len(apds_channels) >= 2 else apds_channels + [0] * (2 - len(apds_channels)))}{Colors.END}  # Only {len(apds_channels)}/2 sensors detected"
             )
     else:
         print(
-            f"{Colors.RED}MUX_CHANS: tuple[int, int, int, int] = (0, 1, 2, 3){Colors.END}  # No APDS sensors detected"
+            f"{Colors.RED}MUX_CHANS: tuple[int, int] = (0, 1){Colors.END}  # No APDS sensors detected"
         )
 
     # Summary
@@ -227,13 +227,13 @@ def generate_config_suggestions(
         f"  Multiplexer (TCA):   {Colors.GREEN if mux_addr else Colors.RED}{'✓ Found' if mux_addr else '✗ Not found'}{Colors.END}"
     )
     print(
-        f"  Proximity sensors:   {Colors.GREEN if len(apds_channels) == 4 else Colors.YELLOW if apds_channels else Colors.RED}{len(apds_channels)}/4 detected{Colors.END}"
+        f"  Proximity sensors:   {Colors.GREEN if len(apds_channels) == 2 else Colors.YELLOW if apds_channels else Colors.RED}{len(apds_channels)}/2 detected{Colors.END}"
     )
 
     # Sensor mapping
     if apds_channels:
         print(f"\n{Colors.BOLD}Sensor Channel Mapping:{Colors.END}")
-        sensor_labels = ["Left-Outer", "Left-Inner", "Right-Inner", "Right-Outer"]
+        sensor_labels = ["Left", "Right"]
         print("  (Verify this matches your physical layout)")
         for i, ch in enumerate(apds_channels):
             label = sensor_labels[i] if i < len(sensor_labels) else f"Sensor {i}"
@@ -244,20 +244,21 @@ def generate_config_suggestions(
         print(f"\n{Colors.YELLOW}⚠ Warning: No IMU detected{Colors.END}")
         print("  - Check MPU-6050 wiring (SDA, SCL, VCC, GND, AD0)")
         print("  - Ensure MPU-6050 has 3.3V power and common ground")
-        print("  - Expected addresses: 0x4A or 0x4B")
+        print("  - Expected addresses: 0x68 (AD0 low) or 0x69 (AD0 high)")
 
     if not mux_addr:
         print(f"\n{Colors.YELLOW}⚠ Warning: No multiplexer detected{Colors.END}")
         print("  - Check TCA9548A wiring")
         print("  - Expected address: 0x70 (default)")
 
-    if len(apds_channels) < 4:
+    if len(apds_channels) < 2:
         print(
-            f"\n{Colors.YELLOW}⚠ Warning: Only {len(apds_channels)}/4 proximity sensors detected{Colors.END}"
+            f"\n{Colors.YELLOW}⚠ Warning: Only {len(apds_channels)}/2 proximity sensors detected{Colors.END}"
         )
         print("  - Check APDS9960 wiring on each MUX channel")
         print("  - All APDS9960 sensors use address 0x39")
         print("  - Each sensor must be on a different MUX channel")
+        print("  - Expected: 2 front-facing sensors (left and right)")
 
 
 def main():

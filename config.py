@@ -19,7 +19,6 @@ class Pins:
     LEFT_ENABLE: int = 27  # Driver Left  Enable GPIO27
     VACUUM_PWM: int = 5  # Vacuum MOSFET     GPIO5
     BUZZER: int = 12  # Buzzer/Beeper      GPIO12
-    # Gesture sensor I2C (separate bus or software I2C)
     GESTURE_SDA: int = 15  # Gesture APDS9960 SDA GPIO17
     GESTURE_SCL: int = 14  # Gesture APDS9960 SCL GPIO4
 
@@ -33,7 +32,7 @@ class I2CParams:
     GESTURE_BUS: int = 3  # I2C bus for gesture sensor (software I2C on GPIO 15/14)
     RIGHT_SENSOR_BUS: int = 1  # Right APDS9960 sensor (hardware I2C on GPIO2/GPIO3)
     LEFT_SENSOR_BUS: int = 7  # Left APDS9960 sensor (software I2C on GPIO19/GPIO26)
-    ADDR_IMU: int | None = 0x68  # MPU-6050 detected (AD0 low)
+    ADDR_IMU: int = 0x68  # MPU-6050 detected (AD0 low)
     APDS_ADDR: int = 0x39  # APDS9960 default
     GESTURE_ADDR: int = 0x39  # Gesture APDS9960 (on separate bus)
     # Sensor indices: 0 = left sensor, 1 = right sensor
@@ -48,12 +47,15 @@ class Geometry:
     Robot frame convention: +x forward, +y left, origin at axle midpoint.
     """
 
-    WHEEL_BASE: float = 0.170  # m (update from CAD)
+    WHEEL_BASE: float = 0.165  # m (update from CAD)
     STEPS_PER_M: float = (
-        1212.1  # calibrated from physical test: 0.33m actual / 0.0625m odometry = 5.28x correction
+        1000  # calibrated from physical test: 0.33m actual / 0.0625m odometry = 5.28x correction
     )
-    SENSOR_FWD: float = 0.080  # m; sensors lead axle
-    SENSOR_LAT: tuple[float, ...] = (+0.08484, +0.05444, -0.0544, -0.08484)  # m
+    SENSOR_FWD: float = 0.189125  # m; sensors lead axle
+    SENSOR_LAT: tuple[float, ...] = (
+        +0.08484,
+        -0.08484,
+    )  # m; left and right sensor lateral positions
     VAC_WIDTH: float = 0.198  # m; effective cleaned width
     SENSOR_TO_VAC: float = 0.03949  # m; vacuum ahead of sensors
 
