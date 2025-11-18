@@ -50,7 +50,8 @@ class MotionController:
         Returns:
             (v, ω) command
         """
-        sensors = edge_ctx.get("sensors", []) or [1.0] * len(I2C.MUX_CHANS)
+        # Default to 2 sensors (left and right)
+        sensors = edge_ctx.get("sensors", []) or [1.0, 1.0]
         timestamp = edge_ctx.get("timestamp")
 
         if timestamp is None:
@@ -62,15 +63,9 @@ class MotionController:
                 dt = max(0.0, timestamp - self._last_boundary_ts)
             self._last_boundary_ts = timestamp
 
-        # Compute average readings by side
-        def _avg(indices: tuple[int, int]) -> float:
-            vals = [sensors[i] for i in indices if i < len(sensors)]
-            if not vals:
-                return 1.0
-            return float(np.mean(vals))
-
-        left_mean = _avg(I2C.LEFT_PAIR)
-        right_mean = _avg(I2C.RIGHT_PAIR)
+        # Single sensor per side
+        left_mean = sensors[I2C.LEFT_SENSOR_IDX] if I2C.LEFT_SENSOR_IDX < len(sensors) else 1.0
+        right_mean = sensors[I2C.RIGHT_SENSOR_IDX] if I2C.RIGHT_SENSOR_IDX < len(sensors) else 1.0
 
         # Normalized edge balance: positive when right edge is closer
         balance = float(np.clip(left_mean - right_mean, -1.0, 1.0))

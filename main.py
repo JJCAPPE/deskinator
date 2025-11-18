@@ -17,7 +17,6 @@ from .hw.vacuum import Vacuum
 from .hw.buzzer import Buzzer
 from .hw.gesture import GestureSensor
 from .hw.i2c import I2CBus
-from .hw.tca9548a import TCA9548A
 from .hw.apds9960 import APDS9960
 from .hw.mpu6050 import MPU6050
 from .slam.ekf import EKF
@@ -74,26 +73,32 @@ class Deskinator:
             print(f"[Init] Warning: Gesture sensor unavailable ({e})")
 
         # I2C devices
-        # Main bus for mux and sensors (bus 1 - hardware I2C)
-        self.i2c = I2CBus(I2C.BUS)
-        self.mux = TCA9548A(self.i2c, I2C.ADDR_MUX)
-
-        # Proximity sensors
+        # Proximity sensors on separate buses
         self.sensors = []
-        for i, chan in enumerate(I2C.MUX_CHANS):
-            self.mux.select(chan)
-            # Conservative settle time after MUX channel switch (20ms)
-            time.sleep(0.020)
-            sensor = APDS9960(self.i2c, I2C.APDS_ADDR)
-            sensor.init()
-            # Brief delay after initialization
-            time.sleep(0.010)
-            self.sensors.append(sensor)
-            print(f"  APDS9960 #{i} on MUX channel {chan}")
+        
+        # Left sensor on bus 7 (GPIO19/GPIO26)
+        try:
+            left_i2c = I2CBus(I2C.LEFT_SENSOR_BUS)
+            left_sensor = APDS9960(left_i2c, I2C.APDS_ADDR)
+            left_sensor.init()
+            self.sensors.append(left_sensor)
+            print(f"  Left APDS9960 on bus {I2C.LEFT_SENSOR_BUS} @ 0x{I2C.APDS_ADDR:02x}")
+        except Exception as e:
+            print(f"[Init] Warning: Left sensor unavailable ({e})")
+            self.sensors.append(None)
+        
+        # Right sensor on bus 1 (GPIO2/GPIO3 - hardware I2C)
+        try:
+            right_i2c = I2CBus(I2C.RIGHT_SENSOR_BUS)
+            right_sensor = APDS9960(right_i2c, I2C.APDS_ADDR)
+            right_sensor.init()
+            self.sensors.append(right_sensor)
+            print(f"  Right APDS9960 on bus {I2C.RIGHT_SENSOR_BUS} @ 0x{I2C.APDS_ADDR:02x}")
+        except Exception as e:
+            print(f"[Init] Warning: Right sensor unavailable ({e})")
+            self.sensors.append(None)
 
-        self.mux.select(None)
-
-        # IMU on separate bus (bus 5 - software I2C) to avoid interference with mux
+        # IMU on separate bus (bus 5 - software I2C)
         self.imu_i2c = I2CBus(I2C.IMU_BUS)
         self.imu = MPU6050(self.imu_i2c, I2C.ADDR_IMU or 0x68)
         if getattr(self.imu, "sim_mode", False):
@@ -125,7 +130,7 @@ class Deskinator:
         self.running = False
         self.start_signal = False
         self.finish_alerted = False
-        self.edge_filters = [1.0 for _ in I2C.MUX_CHANS]
+        self.edge_filters = [1.0 for _ in self.sensors]
         self.edge_drop_counts = {"left": 0, "right": 0}
         self.edge_debounce_cycles = max(1, int(ALG.EDGE_DEBOUNCE * ALG.FUSE_HZ))
         self.last_node_pose = (0.0, 0.0, 0.0)
@@ -146,24 +151,42 @@ class Deskinator:
         print("=" * 60)
 
     def scan_i2c(self):
-        """Scan I2C bus and print devices."""
-        print("[I2C] Scanning bus...")
-        devices = self.i2c.scan()
-        print(f"  Found {len(devices)} device(s):")
-        for addr in devices:
-            print(f"    0x{addr:02x}")
+        """Scan I2C buses and print devices."""
+        print("[I2C] Scanning buses...")
+        
+        print(f"\n  Bus {I2C.LEFT_SENSOR_BUS} (Left sensor):")
+        try:
+            left_bus = I2CBus(I2C.LEFT_SENSOR_BUS)
+            devices = left_bus.scan()
+            print(f"    Found {len(devices)} device(s):")
+            for addr in devices:
+                print(f"      0x{addr:02x}")
+        except Exception as e:
+            print(f"    Error: {e}")
+        
+        print(f"\n  Bus {I2C.RIGHT_SENSOR_BUS} (Right sensor):")
+        try:
+            right_bus = I2CBus(I2C.RIGHT_SENSOR_BUS)
+            devices = right_bus.scan()
+            print(f"    Found {len(devices)} device(s):")
+            for addr in devices:
+                print(f"      0x{addr:02x}")
+        except Exception as e:
+            print(f"    Error: {e}")
 
     def calibrate_sensors(self):
         """Calibrate proximity sensors."""
         print("[Calibrate] Calibrating proximity sensors...")
         print("  This will take about 5 seconds per sensor")
 
+        sensor_names = ["Left", "Right"]
         for i, sensor in enumerate(self.sensors):
-            self.mux.select(I2C.MUX_CHANS[i])
-            print(f"\n  Sensor {i}:")
-            sensor.calibrate(on_table_samples=10, off_table_samples=10)
+            if sensor is not None:
+                print(f"\n  {sensor_names[i]} sensor:")
+                sensor.calibrate(on_table_samples=10, off_table_samples=10)
+            else:
+                print(f"\n  {sensor_names[i]} sensor: Not available")
 
-        self.mux.select(None)
         print("\n[Calibrate] Calibration complete")
 
     def calibrate_imu(self):
@@ -246,16 +269,12 @@ class Deskinator:
 
             # Read proximity sensors
             sensor_readings = []
-            for i, sensor in enumerate(self.sensors):
-                self.mux.select(I2C.MUX_CHANS[i])
-                # Conservative settle time after switching MUX channel (20ms)
-                time.sleep(0.020)
-                reading = sensor.read_proximity_norm()
-                # Small delay after read to ensure I2C transaction completes
-                time.sleep(0.005)
-                sensor_readings.append(reading)
-
-            self.mux.select(None)
+            for sensor in self.sensors:
+                if sensor is not None:
+                    reading = sensor.read_proximity_norm()
+                    sensor_readings.append(reading)
+                else:
+                    sensor_readings.append(1.0)  # Default to "on table" if sensor unavailable
 
             # Check for edge events (pair-based rule)
             self._check_edge_events(sensor_readings)
@@ -293,8 +312,11 @@ class Deskinator:
                     raw.append(sensors[idx])
             return filtered, raw
 
-        left_filtered, left_raw = pair_values(I2C.LEFT_PAIR)
-        right_filtered, right_raw = pair_values(I2C.RIGHT_PAIR)
+        # Single sensor per side now
+        left_filtered = [self.edge_filters[I2C.LEFT_SENSOR_IDX]] if I2C.LEFT_SENSOR_IDX < len(self.edge_filters) else []
+        left_raw = [sensors[I2C.LEFT_SENSOR_IDX]] if I2C.LEFT_SENSOR_IDX < len(sensors) else []
+        right_filtered = [self.edge_filters[I2C.RIGHT_SENSOR_IDX]] if I2C.RIGHT_SENSOR_IDX < len(self.edge_filters) else []
+        right_raw = [sensors[I2C.RIGHT_SENSOR_IDX]] if I2C.RIGHT_SENSOR_IDX < len(sensors) else []
 
         def is_off(filtered: List[float], raw: List[float]) -> bool:
             if not filtered or not raw:
@@ -336,24 +358,30 @@ class Deskinator:
         """Add edge detection points to map."""
         pose = self.ekf.pose()
 
-        # Add points for the triggered sensor pair
+        # Add point for the triggered sensor
         if side == "left":
-            sensor_indices = I2C.LEFT_PAIR
+            sensor_idx = I2C.LEFT_SENSOR_IDX
         else:
-            sensor_indices = I2C.RIGHT_PAIR
+            sensor_idx = I2C.RIGHT_SENSOR_IDX
 
-        for idx in sensor_indices:
-            # Sensor position in robot frame
-            sensor_pos = (GEOM.SENSOR_FWD, GEOM.SENSOR_LAT[idx])
+        # Sensor position in robot frame
+        # Use first sensor lateral position for left, last for right
+        if sensor_idx < len(GEOM.SENSOR_LAT):
+            sensor_lat = GEOM.SENSOR_LAT[sensor_idx]
+        else:
+            # Fallback: use average of left/right positions
+            sensor_lat = GEOM.SENSOR_LAT[0] if side == "left" else GEOM.SENSOR_LAT[-1]
+        
+        sensor_pos = (GEOM.SENSOR_FWD, sensor_lat)
 
-            # Transform to world frame
-            world_pos = transform_point(pose, sensor_pos)
+        # Transform to world frame
+        world_pos = transform_point(pose, sensor_pos)
 
-            # Add to rectangle fit
-            self.rect_fit.add_edge_point(world_pos)
+        # Add to rectangle fit
+        self.rect_fit.add_edge_point(world_pos)
 
-            # Log
-            self.logger.log_edge(time.time(), world_pos, pose)
+        # Log
+        self.logger.log_edge(time.time(), world_pos, pose)
 
     async def loop_map(self):
         """Mapping loop @ 20 Hz."""

@@ -11,12 +11,12 @@ from dataclasses import dataclass
 class Pins:
     """GPIO pin assignments for Raspberry Pi."""
 
-    RIGHT_STEP: int = 20  # Driver Right Step GPIO20 
-    RIGHT_DIR: int = 21  # Driver Right Dir  GPIO21 
-    RIGHT_ENABLE: int = 16  # Driver Right Enable GPIO16 
-    LEFT_DIR: int = 23  # Driver Left  Dir  GPIO23 
-    LEFT_STEP: int = 22  # Driver Left  Step GPIO22 
-    LEFT_ENABLE: int = 27  # Driver Left  Enable GPIO27 
+    RIGHT_STEP: int = 20  # Driver Right Step GPIO20
+    RIGHT_DIR: int = 21  # Driver Right Dir  GPIO21
+    RIGHT_ENABLE: int = 16  # Driver Right Enable GPIO16
+    LEFT_DIR: int = 23  # Driver Left  Dir  GPIO23
+    LEFT_STEP: int = 22  # Driver Left  Step GPIO22
+    LEFT_ENABLE: int = 27  # Driver Left  Enable GPIO27
     VACUUM_PWM: int = 5  # Vacuum MOSFET     GPIO5
     BUZZER: int = 12  # Buzzer/Beeper      GPIO12
     # Gesture sensor I2C (separate bus or software I2C)
@@ -28,21 +28,17 @@ class Pins:
 class I2CParams:
     """I2C bus configuration and device addresses."""
 
-    BUS: int = 1  # Main I2C bus for mux and sensors (hardware I2C)
+    BUS: int = 1  # Main I2C bus (hardware I2C on GPIO2/GPIO3)
     IMU_BUS: int = 5  # I2C bus for IMU (software I2C on GPIO 6/13)
     GESTURE_BUS: int = 3  # I2C bus for gesture sensor (software I2C on GPIO 15/14)
+    RIGHT_SENSOR_BUS: int = 1  # Right APDS9960 sensor (hardware I2C on GPIO2/GPIO3)
+    LEFT_SENSOR_BUS: int = 7  # Left APDS9960 sensor (software I2C on GPIO19/GPIO26)
     ADDR_IMU: int | None = 0x68  # MPU-6050 detected (AD0 low)
-    ADDR_MUX: int = 0x70  # TCA9548A detected
     APDS_ADDR: int = 0x39  # APDS9960 default
     GESTURE_ADDR: int = 0x39  # Gesture APDS9960 (on separate bus)
-    MUX_CHANS: tuple[int, int, int, int] = (
-        0,
-        1,
-        2,
-        3,
-    )  # Four front-facing APDS sensors
-    LEFT_PAIR: tuple[int, int] = (0, 1)  # define exact channels later
-    RIGHT_PAIR: tuple[int, int] = (2, 3)
+    # Sensor indices: 0 = left sensor, 1 = right sensor
+    LEFT_SENSOR_IDX: int = 0
+    RIGHT_SENSOR_IDX: int = 1
 
 
 @dataclass
