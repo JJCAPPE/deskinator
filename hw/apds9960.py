@@ -1,45 +1,40 @@
 """
 APDS9960 proximity sensor driver.
 
-Minimal implementation using adafruit_apds9960 library.
+Minimal implementation using direct I2C register access.
 """
 
 import time
 import numpy as np
 from .i2c import I2CBus
 
-try:
-    import busio
-    from adafruit_apds9960.apds9960 import APDS9960 as AdafruitAPDS9960
+# APDS9960 Registers
+APDS9960_ENABLE = 0x80
+APDS9960_PDATA = 0x9C
+APDS9960_CONTROL = 0x8F
+APDS9960_PPULSE = 0x8E
 
-    ADAFRUIT_AVAILABLE = True
-except ImportError:
-    ADAFRUIT_AVAILABLE = False
+# Enable bits
+APDS9960_PON = 0x01  # Power on
+APDS9960_PEN = 0x04  # Proximity enable
 
 
 class APDS9960:
-    """APDS9960 proximity sensor using adafruit library."""
+    """APDS9960 proximity sensor."""
 
     def __init__(self, bus: I2CBus, address: int = 0x39):
         """
         Initialize APDS9960 sensor.
 
         Args:
-            bus: I2C bus instance (extracts bus_number from it)
-            address: I2C address (default 0x39, ignored - adafruit library handles it)
+            bus: I2C bus instance
+            address: I2C address (default 0x39)
         """
-        self.bus_number = bus.bus_number  # currently informational only
+        self.bus = bus
         self.address = address
         self.calibration_offset = 0.0
         self.calibration_scale = 1.0
-        self.sensor = None
-        self.sim_mode = not ADAFRUIT_AVAILABLE
-
-        if not ADAFRUIT_AVAILABLE:
-            print(
-                "Warning: adafruit_apds9960 not available. "
-                "Install with: pip install adafruit-circuitpython-apds9960"
-            )
+        self.sim_mode = bus.sim_mode
 
     def init(self):
         """Initialize sensor for proximity detection."""
@@ -48,24 +43,28 @@ class APDS9960:
             return
 
         try:
-            import board
+            # Power on
+            self.bus.write_byte_data(self.address, APDS9960_ENABLE, APDS9960_PON)
+            time.sleep(0.05)
 
-            # Uses default I2C pins (bus 1 on Raspberry Pi)
-            i2c = busio.I2C(board.SCL, board.SDA)
+            # Configure proximity detection: PDRIVE = 100mA, PGAIN = 8x
+            self.bus.write_byte_data(self.address, APDS9960_CONTROL, 0x2C)
 
-            self.sensor = AdafruitAPDS9960(i2c)
-            self.sensor.enable_proximity = True
+            # Proximity pulse: 16 pulses, 16us length
+            self.bus.write_byte_data(self.address, APDS9960_PPULSE, 0x8F)
+
+            # Enable proximity detection
+            enable = self.bus.read_byte_data(self.address, APDS9960_ENABLE)
+            self.bus.write_byte_data(
+                self.address, APDS9960_ENABLE, enable | APDS9960_PEN
+            )
 
             time.sleep(0.1)
 
         except Exception as e:
-            print(f"APDS9960: Failed to initialize on bus {self.bus_number}: {e}")
+            print(f"APDS9960: Failed to initialize on bus {self.bus.bus_number}: {e}")
             print("  Falling back to simulation mode")
-            import traceback
-
-            traceback.print_exc()
             self.sim_mode = True
-            self.sensor = None
 
     def read_proximity_raw(self) -> int:
         """
@@ -74,11 +73,11 @@ class APDS9960:
         Returns:
             Raw proximity value (0-255)
         """
-        if self.sim_mode or self.sensor is None:
+        if self.sim_mode:
             return 0
 
         try:
-            return int(self.sensor.proximity)
+            return int(self.bus.read_byte_data(self.address, APDS9960_PDATA))
         except Exception as e:
             print(f"APDS9960: Read error: {e}")
             return 0

@@ -2,28 +2,58 @@
 Gesture sensor using APDS9960 for start/stop control.
 
 Uses a dedicated I2C bus (software or hardware) on GPIO17/GPIO4 to avoid
-conflicts with the proximity sensors on other I2C buses.
+conflicts with the 4 proximity sensors on the main I2C bus.
 """
 
 import time
 from typing import Literal, Optional
 
 try:
-    import busio
-    import board
-    from adafruit_apds9960.apds9960 import APDS9960 as AdafruitAPDS9960
+    import smbus2
 
-    ADAFRUIT_AVAILABLE = True
+    SMBUS_AVAILABLE = True
 except ImportError:
-    ADAFRUIT_AVAILABLE = False
-    print(
-        "Warning: adafruit_apds9960 not available. Gesture sensor in simulation mode."
-    )
+    SMBUS_AVAILABLE = False
+    print("Warning: smbus2 not available. Gesture sensor in simulation mode.")
 
 try:  # Support both package and script execution
     from ..config import PINS, I2C as I2C_CONFIG  # type: ignore[import-not-found]
 except ImportError:  # pragma: no cover - fallback when run as script
     from config import PINS, I2C as I2C_CONFIG
+
+
+# APDS9960 Registers
+APDS9960_ENABLE = 0x80
+APDS9960_GCONF1 = 0xA2
+APDS9960_GCONF2 = 0xA3
+APDS9960_GCONF3 = 0xAA
+APDS9960_GCONF4 = 0xAB
+APDS9960_GSTATUS = 0xAF
+APDS9960_GFLVL = 0xAE
+APDS9960_GFIFO_U = 0xFC
+APDS9960_GFIFO_D = 0xFD
+APDS9960_GFIFO_L = 0xFE
+APDS9960_GFIFO_R = 0xFF
+APDS9960_GPULSE = 0xA6
+APDS9960_GOFFSET_U = 0xA9
+APDS9960_GOFFSET_D = 0xA7
+APDS9960_GOFFSET_L = 0xA8
+APDS9960_GOFFSET_R = 0xAA
+APDS9960_PDATA = 0x9C
+APDS9960_CONTROL = 0x8F
+APDS9960_PPULSE = 0x8E
+
+# Enable bits
+APDS9960_PON = 0x01  # Power on
+APDS9960_GEN = 0x40  # Gesture enable
+APDS9960_PEN = 0x04  # Proximity enable
+
+# Gesture directions
+GESTURE_NONE = 0
+GESTURE_UP = 1
+GESTURE_DOWN = 2
+GESTURE_LEFT = 3
+GESTURE_RIGHT = 4
 
 
 GestureType = Literal["none", "up", "down", "left", "right"]
@@ -34,102 +64,186 @@ class GestureSensor:
     APDS9960 gesture/proximity sensor for touchless start control.
 
     Uses a separate I2C bus to avoid address conflicts with proximity sensors.
-    Simplified to use adafruit library like the proximity sensors.
     """
 
     def __init__(
         self,
         bus_number: int = 3,
         address: int = 0x39,
-        trigger_threshold: int = 50,
+        trigger_offset: int = 25,
+        hysteresis: int = 5,
     ):
         """
         Initialize gesture sensor.
 
         Args:
             bus_number: I2C bus number (3 for software I2C on GPIO17/4)
-            address: I2C address (default 0x39, ignored - adafruit library handles it)
-            trigger_threshold: Raw proximity value threshold to trigger start (default 50)
+            address: I2C address (default 0x39)
+            trigger_offset: Raw proximity delta above baseline to detect a hand
+            hysteresis: Raw proximity hysteresis for release detection
+
+        Note:
+            On Raspberry Pi, you may need to configure software I2C or use
+            dtoverlay to create an additional I2C bus on GPIO17/GPIO4.
         """
         self.bus_number = bus_number
         self.address = address
-        self.trigger_threshold = trigger_threshold
-        self.sensor = None
-        self.sim_mode = not ADAFRUIT_AVAILABLE
+        self.bus = None
+        self.sim_mode = not SMBUS_AVAILABLE
+
+        # Proximity trigger configuration
+        self.trigger_offset = max(1, trigger_offset)
+        self.hysteresis = max(1, hysteresis)
+        self.proximity_baseline = 0.0
+        self.proximity_trigger_level = 0
+        self.proximity_release_level = 0
+        self._proximity_active = False
         self.last_proximity_raw = 0
 
-        if not ADAFRUIT_AVAILABLE:
-            print(
-                "Warning: adafruit_apds9960 not available. "
-                "Install with: pip install adafruit-circuitpython-apds9960"
-            )
+        # Gesture state
+        self.gesture_ud_delta = 0
+        self.gesture_lr_delta = 0
+        self.gesture_ud_count = 0
+        self.gesture_lr_count = 0
+        self.gesture_near_count = 0
+        self.gesture_far_count = 0
 
         if not self.sim_mode:
             try:
+                from smbus2 import SMBus
+
+                self.bus = SMBus(bus_number)
                 self._init_sensor()
+                self._calibrate_proximity_baseline()
             except Exception as e:
                 print(f"Gesture sensor: Failed to initialize on bus {bus_number}: {e}")
                 print("  Falling back to simulation mode")
+                print("  See HARDWARE_SETUP.md for I2C bus configuration")
                 self.sim_mode = True
-                self.sensor = None
 
     def _init_sensor(self):
-        """Initialize the APDS9960 for proximity detection."""
+        """Initialize the APDS9960 for gesture detection."""
         if self.sim_mode:
             return
 
         try:
-            # Uses default I2C pins (bus 1 on Raspberry Pi)
-            # Note: For other buses, you may need to configure GPIO pins differently
-            i2c = busio.I2C(board.SCL, board.SDA)
+            # Power on
+            self.bus.write_byte_data(self.address, APDS9960_ENABLE, APDS9960_PON)
+            time.sleep(0.01)
 
-            self.sensor = AdafruitAPDS9960(i2c)
-            self.sensor.enable_proximity = True
+            # Configure gesture engine
+            # GMODE = 1 (gesture mode)
+            self.bus.write_byte_data(self.address, APDS9960_GCONF4, 0x01)
 
-            time.sleep(0.1)
+            # Set gesture proximity entry threshold
+            self.bus.write_byte_data(self.address, APDS9960_GCONF1, 0x40)
 
-            print(
-                f"  Gesture sensor ready (trigger threshold: {self.trigger_threshold})"
+            # Set gesture exit persistence (4 gesture end)
+            self.bus.write_byte_data(self.address, APDS9960_GCONF2, 0x01)
+
+            # Set gesture LED drive strength and wait time
+            self.bus.write_byte_data(self.address, APDS9960_GPULSE, 0xC9)
+
+            # Configure proximity sensing for presence detection
+            self.bus.write_byte_data(self.address, APDS9960_CONTROL, 0x2C)
+            self.bus.write_byte_data(self.address, APDS9960_PPULSE, 0x87)
+
+            # Enable proximity and gesture
+            enable = self.bus.read_byte_data(self.address, APDS9960_ENABLE)
+            self.bus.write_byte_data(
+                self.address, APDS9960_ENABLE, enable | APDS9960_GEN | APDS9960_PEN
             )
+
+            time.sleep(0.01)
 
         except Exception as e:
             print(f"Gesture sensor initialization error: {e}")
-            import traceback
-
-            traceback.print_exc()
             self.sim_mode = True
-            self.sensor = None
+
+    def _calibrate_proximity_baseline(self):
+        """Establish baseline proximity levels for presence detection."""
+        if self.sim_mode or not self.bus:
+            self.proximity_baseline = 0.0
+            self.proximity_trigger_level = int(self.trigger_offset)
+            self.proximity_release_level = max(
+                0, self.proximity_trigger_level - self.hysteresis
+            )
+            return
+
+        samples = []
+        try:
+            for _ in range(10):
+                samples.append(self.bus.read_byte_data(self.address, APDS9960_PDATA))
+                time.sleep(0.02)
+        except Exception as exc:
+            print(f"Gesture sensor: baseline read error: {exc}")
+            samples = []
+
+        if samples:
+            self.proximity_baseline = sum(samples) / len(samples)
+        else:
+            self.proximity_baseline = 0.0
+
+        trigger = int(round(self.proximity_baseline + self.trigger_offset))
+        trigger = min(255, max(1, trigger))
+        release = max(0, trigger - self.hysteresis)
+
+        self.proximity_trigger_level = trigger
+        self.proximity_release_level = release
+        self._proximity_active = False
+        self.last_proximity_raw = int(self.proximity_baseline)
+
+        if not self.sim_mode:
+            print(
+                "  Gesture sensor proximity baseline: "
+                f"{self.proximity_baseline:.1f} (trigger >= {self.proximity_trigger_level})"
+            )
 
     def read_proximity_raw(self) -> int:
         """Read raw proximity value (0-255)."""
-        if self.sim_mode or self.sensor is None:
+        if self.sim_mode or not self.bus:
             return 0
 
         try:
-            raw = int(self.sensor.proximity)
+            raw = self.bus.read_byte_data(self.address, APDS9960_PDATA)
             self.last_proximity_raw = raw
             return raw
-        except Exception as e:
-            print(f"Gesture sensor: proximity read error: {e}")
+        except Exception as exc:
+            print(f"Gesture sensor: proximity read error: {exc}")
             return 0
 
     def read_proximity_norm(self) -> float:
         """Read normalized proximity value between 0.0 (far) and 1.0 (near)."""
         raw = self.read_proximity_raw()
-        return float(raw / 255.0)
+        normalized = 0.0
+        if raw >= self.proximity_trigger_level:
+            normalized = 1.0
+        elif self.proximity_trigger_level > self.proximity_baseline:
+            normalized = (raw - self.proximity_baseline) / (
+                self.proximity_trigger_level - self.proximity_baseline
+            )
+        return max(0.0, min(1.0, normalized))
 
     def is_hand_present(self) -> bool:
-        """Return True when raw proximity value exceeds the trigger threshold (> 50)."""
+        """Return True when proximity exceeds the trigger threshold."""
         if self.sim_mode:
             return False
 
         raw = self.read_proximity_raw()
-        return raw > self.trigger_threshold
+
+        if self._proximity_active:
+            if raw <= self.proximity_release_level:
+                self._proximity_active = False
+        else:
+            if raw >= self.proximity_trigger_level:
+                self._proximity_active = True
+
+        return self._proximity_active
 
     def wait_for_hand_presence(
         self, timeout: Optional[float] = 30.0, hold_time: float = 0.2
     ) -> bool:
-        """Block until raw proximity value > threshold is detected."""
+        """Block until a hand is detected near the sensor."""
         if self.sim_mode:
             return False
 
@@ -156,17 +270,86 @@ class GestureSensor:
         Check if a gesture is available to read.
 
         Returns:
-            False (gesture detection not implemented, only proximity)
+            True if gesture data is ready
         """
-        return False
+        if self.sim_mode:
+            return False
+
+        try:
+            status = self.bus.read_byte_data(self.address, APDS9960_GSTATUS)
+            return (status & 0x01) != 0  # GVALID bit
+        except:
+            return False
 
     def read_gesture(self) -> GestureType:
         """
         Read and decode gesture.
 
         Returns:
-            "none" (gesture detection not implemented, only proximity)
+            Gesture direction: "none", "up", "down", "left", "right"
         """
+        if self.sim_mode:
+            return "none"
+
+        if not self.is_gesture_available():
+            return "none"
+
+        try:
+            # Read FIFO level
+            fifo_level = self.bus.read_byte_data(self.address, APDS9960_GFLVL)
+
+            if fifo_level == 0:
+                return "none"
+
+            # Read gesture data
+            gesture_data = []
+            for _ in range(fifo_level):
+                up = self.bus.read_byte_data(self.address, APDS9960_GFIFO_U)
+                down = self.bus.read_byte_data(self.address, APDS9960_GFIFO_D)
+                left = self.bus.read_byte_data(self.address, APDS9960_GFIFO_L)
+                right = self.bus.read_byte_data(self.address, APDS9960_GFIFO_R)
+                gesture_data.append((up, down, left, right))
+
+            # Process gesture data
+            return self._process_gesture_data(gesture_data)
+
+        except Exception as e:
+            print(f"Gesture read error: {e}")
+            return "none"
+
+    def _process_gesture_data(self, data: list) -> GestureType:
+        """
+        Process raw gesture data to determine direction.
+
+        Args:
+            data: List of (up, down, left, right) tuples
+
+        Returns:
+            Gesture direction
+        """
+        if len(data) < 4:
+            return "none"
+
+        # Calculate deltas
+        ud_delta = 0
+        lr_delta = 0
+
+        for up, down, left, right in data:
+            ud_delta += up - down
+            lr_delta += right - left
+
+        # Determine primary direction
+        if abs(ud_delta) > abs(lr_delta):
+            if ud_delta > 13:
+                return "up"
+            elif ud_delta < -13:
+                return "down"
+        else:
+            if lr_delta > 13:
+                return "right"
+            elif lr_delta < -13:
+                return "left"
+
         return "none"
 
     def wait_for_gesture(self, timeout: float = 30.0) -> GestureType:
@@ -177,8 +360,16 @@ class GestureSensor:
             timeout: Maximum time to wait in seconds
 
         Returns:
-            "none" (gesture detection not implemented, only proximity)
+            Detected gesture or "none" if timeout
         """
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            gesture = self.read_gesture()
+            if gesture != "none":
+                return gesture
+            time.sleep(0.05)
+
         return "none"
 
     def wait_for_start_gesture(
@@ -212,8 +403,16 @@ class GestureSensor:
 
     def cleanup(self):
         """Clean up resources."""
-        # Adafruit library handles cleanup automatically
-        pass
+        if not self.sim_mode and self.bus:
+            try:
+                # Disable gesture engine
+                enable = self.bus.read_byte_data(self.address, APDS9960_ENABLE)
+                self.bus.write_byte_data(
+                    self.address, APDS9960_ENABLE, enable & ~APDS9960_GEN
+                )
+                self.bus.close()
+            except:
+                pass
 
 
 def test_gestures():
