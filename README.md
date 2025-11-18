@@ -1,10 +1,10 @@
 # Executive Summary
 Deskinator performs safe tabletop cleaning by fusing sensors, inferring boundaries, and executing coverage paths. Three async loops read sensors, build a map, and command motion. The system uses robust edge detection, rectangle inference, and boustrophedon planning to clean efficiently.
 
-- Sense: Read APDS9960 proximity via TCA9548A, IMU yaw rate, and stepper odometry.
+- Sense: Read APDS9960 proximity sensors on separate I²C buses, IMU yaw rate, and stepper odometry.
 - Estimate: Fuse wheel odometry and gyro in an EKF to track pose.
 - Map: Add pose graph nodes and optimize periodically with odometry and loop constraints.
-- Boundary: Detect off-table edges using paired sensors with debounce and hysteresis.
+- Boundary: Detect off-table edges using left/right sensors with debounce and hysteresis.
 - Infer: Fit a rectangle via RANSAC lines and orthogonality checks, then validate confidence.
 - Plan: Build alternating boustrophedon lanes inside an inset rectangle with overlap.
 - Control: FSM transitions from start to boundary, to coverage, then done or timeout.
@@ -27,10 +27,11 @@ Defines Raspberry Pi GPIO assignments.
 - GESTURE_SDA, GESTURE_SCL  
 
 ## I2CParams  
-Sets main and gesture I²C buses, device addresses, and sensor channels.  
-- BUS, GESTURE_BUS  
-- ADDR_IMU, ADDR_MUX, APDS_ADDR, GESTURE_ADDR  
-- MUX_CHANS, LEFT_PAIR, RIGHT_PAIR  
+Sets I²C bus numbers and device addresses for all sensors.  
+- BUS, GESTURE_BUS, IMU_BUS  
+- RIGHT_SENSOR_BUS, LEFT_SENSOR_BUS (separate buses for front sensors)  
+- ADDR_IMU, APDS_ADDR, GESTURE_ADDR  
+- LEFT_SENSOR_IDX, RIGHT_SENSOR_IDX  
 
 ## Geometry  
 Specifies physical dimensions and sensor offsets.  
@@ -89,13 +90,14 @@ Parses `--viz`, `--calibrate`, and `--scan-i2c` flags and invokes Deskinator.
 ---
 
 # proximity_viewer.py  
-Minimal PyQtGraph GUI to display normalized proximity from four front APDS9960 sensors and one start-gesture sensor.  
+Minimal PyQtGraph GUI to display normalized proximity from front APDS9960 sensors and one start-gesture sensor.  
 
 ## class ProximityRig  
-Handles I²C bus, multiplexing, sensor initialization, and raw/normalized readings.  
+Handles I²C buses, sensor initialization, and raw/normalized readings.  
 - `read()`: Returns `(values, raw_values)` for each sensor  
 - `read_imu()`: Returns `(yaw, yaw_rate)` if IMU present  
 - `close()`: Closes I²C resources  
+- **Note**: This viewer may still reference multiplexer configuration; main robot code uses separate I²C buses  
 
 ## class ProximityViewer  
 Plots a bar graph of live proximity readings and a compass-like IMU orientation.  
@@ -177,12 +179,13 @@ Driver for APDS9960 proximity sensor. Supports raw reads, normalization, and int
 ---
 
 # tca9548a.py  
-Driver for TCA9548A 8-channel I²C multiplexer.  
+Driver for TCA9548A 8-channel I²C multiplexer (legacy; not used in current setup).  
 
 ## TCA9548A  
 - `select(channel)`: Enables one channel or disables all  
 - `get_channel()`: Returns current channel  
 - `disable_all()`: Shorthand to `select(None)`  
+- **Note**: Current setup uses separate I²C buses instead of multiplexer; this module remains for compatibility  
 
 ---
 
@@ -361,10 +364,10 @@ Supervises high-level robot phases: WAIT_START → BOUNDARY_DISCOVERY → COVERA
 Benchmarks motor distance accuracy by commanding a distance and measuring actual travel.  
 
 ### test_hardware.py  
-Comprehensive wiring test covering I²C, multiplexer, proximity sensors, IMU, steppers, buzzer, and gesture sensor.  
+Comprehensive wiring test covering I²C buses, proximity sensors, IMU, steppers, buzzer, and gesture sensor. May include multiplexer tests for legacy setups.  
 
 ### scan_i2c.py  
-Scans main bus and each TCA9548A channel. Suggests updated `config.py` values.  
+Scans I²C buses and suggests updated `config.py` values. Supports both multiplexer-based and separate-bus configurations.  
 
 ### manual_stepper_control.py  
 Interactive WASD-based jog utility for Adafruit MotorKit steppers via keyboard.  
@@ -396,7 +399,10 @@ Package info: `deskinator` v0.1.0, Python ≥3.10, optional `rpi` extras, consol
 Project overview, installation, usage, configuration, safety, and algorithm summaries.  
 
 ### HARDWARE_SETUP.md  
-Step-by-step wiring and I²C setup guide with pull-up resistor notes and troubleshooting tips.  
+Step-by-step wiring and I²C setup guide with pull-up resistor notes and troubleshooting tips.
+
+### I2C_SETUP.md  
+I²C bus configuration guide for separate-bus sensor setup, including dtoverlay configuration and bus speed settings.  
 
 ### deskinator-slam-plan.md  
 Detailed AI agent spec covering repository layout, HAL API, SLAM, rectangle inference, coverage planning, and control FSM.  
