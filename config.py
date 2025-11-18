@@ -27,7 +27,7 @@ class Pins:
 class I2CParams:
     """I2C bus configuration and device addresses."""
 
-    BUS: int = 1  # Main I2C bus (hardware I2C on GPIO2/GPIO3)
+    BUS: int = 1  # Left  (hardware I2C on GPIO2/GPIO3)
     IMU_BUS: int = 5  # I2C bus for IMU (software I2C on GPIO 6/13)
     GESTURE_BUS: int = 3  # I2C bus for gesture sensor (software I2C on GPIO 15/14)
     RIGHT_SENSOR_BUS: int = 1  # Right APDS9960 sensor (hardware I2C on GPIO2/GPIO3)

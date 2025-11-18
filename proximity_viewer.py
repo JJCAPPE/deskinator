@@ -1,8 +1,8 @@
 """Minimal live viewer for Deskinator proximity sensors.
 
 Displays the normalized distance (0.0 = far, 1.0 = near) measured by the
-four front APDS9960 sensors plus the separate start-gesture sensor. Designed
-to resemble the lightweight approach in ``pose_viewer.py`` while staying
+two front APDS9960 sensors (left and right) plus the separate start-gesture sensor.
+Designed to resemble the lightweight approach in ``pose_viewer.py`` while staying
 simple enough to run directly on the robot.
 
 Usage examples::
@@ -45,7 +45,6 @@ from hw.apds9960 import APDS9960
 from hw.gesture import GestureSensor
 from hw.i2c import I2CBus
 from hw.mpu6050 import MPU6050
-from hw.tca9548a import TCA9548A
 
 
 def _parse_optional_hex(value: str) -> Optional[int]:
@@ -60,43 +59,39 @@ class ProximityRig:
 
     def __init__(
         self,
-        bus_number: int,
+        left_bus: int,
+        right_bus: int,
         sensor_address: int,
-        mux_address: int,
-        mux_channels: Sequence[int],
         gesture_bus: int,
         gesture_address: int,
         imu_address: Optional[int] = None,
         imu_bus: Optional[int] = None,
     ) -> None:
-        self.bus = I2CBus(bus_number)
-        self.mux = TCA9548A(self.bus, mux_address)
-        self.mux_channels = list(mux_channels)
-        default_names = ("left_outer", "left_inner", "right_inner", "right_outer")
-        self.channel_names = [
-            default_names[i] if i < len(default_names) else f"sensor_{i}"
-            for i, _ in enumerate(self.mux_channels)
-        ]
+        self.channel_names = ["left", "right"]
 
         self.sensors: List[Optional[APDS9960]] = []
-        for ch in self.mux_channels:
-            sensor: Optional[APDS9960]
-            try:
-                self.mux.select(ch)
-                # Conservative settle time after MUX channel switch (20ms)
-                time.sleep(0.020)
-                sensor = APDS9960(self.bus, sensor_address)
-                sensor.init()
-                # Brief delay after initialization
-                time.sleep(0.010)
-            except Exception as exc:
-                print(
-                    f"Warning: failed to init proximity sensor on channel {ch}: {exc}"
-                )
-                sensor = None
-            self.sensors.append(sensor)
-
-        self.mux.select(None)
+        
+        # Left sensor
+        try:
+            left_i2c = I2CBus(left_bus)
+            left_sensor = APDS9960(left_i2c, sensor_address)
+            left_sensor.init()
+            time.sleep(0.010)
+            self.sensors.append(left_sensor)
+        except Exception as exc:
+            print(f"Warning: failed to init left proximity sensor on bus {left_bus}: {exc}")
+            self.sensors.append(None)
+        
+        # Right sensor
+        try:
+            right_i2c = I2CBus(right_bus)
+            right_sensor = APDS9960(right_i2c, sensor_address)
+            right_sensor.init()
+            time.sleep(0.010)
+            self.sensors.append(right_sensor)
+        except Exception as exc:
+            print(f"Warning: failed to init right proximity sensor on bus {right_bus}: {exc}")
+            self.sensors.append(None)
 
         gesture: Optional[GestureSensor]
         try:
@@ -132,29 +127,24 @@ class ProximityRig:
         values: List[Optional[float]] = []
         raw_values: List[Optional[int]] = []
 
-        for ch, sensor in zip(self.mux_channels, self.sensors):
+        for sensor in self.sensors:
             if sensor is None:
                 values.append(None)
                 raw_values.append(None)
                 continue
 
             try:
-                self.mux.select(ch)
-                # Conservative settle time after MUX channel switch (20ms)
-                time.sleep(0.020)
                 raw = sensor.read_proximity_raw()
                 # Small delay between raw and normalized reads
                 time.sleep(0.005)
                 reading = sensor.read_proximity_norm()
                 raw_values.append(raw)
             except Exception as exc:
-                print(f"Warning: read error on channel {ch}: {exc}")
+                print(f"Warning: read error on sensor: {exc}")
                 reading = None
                 raw_values.append(None)
 
             values.append(reading)
-
-        self.mux.select(None)
 
         if self.gesture is not None:
             try:
@@ -179,11 +169,6 @@ class ProximityRig:
             return None, None
 
         try:
-            self.mux.select(None)
-        except Exception:
-            pass
-
-        try:
             yaw, yaw_rate = self.imu.read_yaw_and_rate()
         except Exception as exc:
             if not self._imu_warning_printed:
@@ -197,22 +182,19 @@ class ProximityRig:
     def close(self) -> None:
         """Release I2C resources."""
 
-        try:
-            self.mux.select(None)
-        except Exception:
-            pass
-
         if hasattr(self.gesture, "bus") and getattr(self.gesture, "bus", None):
             try:
                 self.gesture.bus.close()  # type: ignore[attr-defined]
             except Exception:
                 pass
 
-        if hasattr(self.bus, "close"):
-            try:
-                self.bus.close()
-            except Exception:
-                pass
+        # Close I2C buses for sensors
+        for sensor in self.sensors:
+            if sensor is not None and hasattr(sensor, "bus"):
+                try:
+                    sensor.bus.close()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
 
 
 class ProximityViewer(QtWidgets.QMainWindow):
@@ -370,16 +352,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Calibrate APDS sensors (interactive) and exit",
     )
     parser.add_argument(
-        "--bus",
+        "--left-bus",
         type=int,
-        default=I2C.BUS,
-        help="I2C bus number for the front sensors (default from config)",
+        default=I2C.LEFT_SENSOR_BUS,
+        help="I2C bus number for the left front sensor (default from config)",
     )
     parser.add_argument(
-        "--mux-addr",
-        type=lambda x: int(x, 0),
-        default=I2C.ADDR_MUX,
-        help="TCA9548A multiplexer address (default from config)",
+        "--right-bus",
+        type=int,
+        default=I2C.RIGHT_SENSOR_BUS,
+        help="I2C bus number for the right front sensor (default from config)",
     )
     parser.add_argument(
         "--sensor-addr",
@@ -414,41 +396,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # Optional one-shot calibration path
     if args.calibrate:
         rig = ProximityRig(
-            bus_number=args.bus,
+            left_bus=args.left_bus,
+            right_bus=args.right_bus,
             sensor_address=args.sensor_addr,
-            mux_address=args.mux_addr,
-            mux_channels=I2C.MUX_CHANS,
             gesture_bus=args.gesture_bus,
             gesture_address=args.gesture_addr,
             imu_address=args.imu_addr,
             imu_bus=I2C.IMU_BUS,
         )
         print("\nStarting APDS calibration (place over table, then off edge when prompted)...")
-        for ch, sensor in zip(rig.mux_channels, rig.sensors):
+        sensor_names = ["left", "right"]
+        for name, sensor in zip(sensor_names, rig.sensors):
             if sensor is None:
-                print(f"- Channel {ch}: not present, skipping")
+                print(f"- {name.capitalize()} sensor: not present, skipping")
                 continue
             try:
-                rig.mux.select(ch)
-                # Conservative settle time before calibration (20ms)
-                time.sleep(0.020)
-                print(f"\nCalibrating sensor on channel {ch}:")
+                print(f"\nCalibrating {name} sensor:")
                 sensor.calibrate(on_table_samples=10, off_table_samples=10)
             except Exception as exc:
-                print(f"  Calibration error on channel {ch}: {exc}")
-        rig.mux.select(None)
+                print(f"  Calibration error on {name} sensor: {exc}")
         rig.close()
         print("\nCalibration complete.")
         return 0
 
     rig = ProximityRig(
-        bus_number=args.bus,
+        left_bus=args.left_bus,
+        right_bus=args.right_bus,
         sensor_address=args.sensor_addr,
-        mux_address=args.mux_addr,
-        mux_channels=I2C.MUX_CHANS,
         gesture_bus=args.gesture_bus,
         gesture_address=args.gesture_addr,
         imu_address=args.imu_addr,
+        imu_bus=I2C.IMU_BUS,
     )
 
     app = QtWidgets.QApplication(sys.argv)
