@@ -267,16 +267,16 @@ class Deskinator:
             self.ekf.predict(dSL, dSR, dt)
             self.ekf.update_gyro(yaw_rate, dt)
 
-            # Read proximity sensors
+            # Read proximity sensors (raw values for edge detection)
             sensor_readings = []
             for sensor in self.sensors:
                 if sensor is not None:
-                    reading = sensor.read_proximity_norm()
+                    reading = sensor.read_proximity_raw()
                     sensor_readings.append(reading)
                 else:
-                    sensor_readings.append(1.0)  # Default to "on table" if sensor unavailable
+                    sensor_readings.append(255)  # Default to "on table" if sensor unavailable (high value)
 
-            # Check for edge events (pair-based rule)
+            # Check for edge events (raw value threshold: < 15)
             self._check_edge_events(sensor_readings)
 
             # Store sensor context
@@ -290,46 +290,21 @@ class Deskinator:
             self.sense_timer.stop()
             rate.sleep()
 
-    def _check_edge_events(self, sensors: List[float]):
-        """Check for edge detection events."""
+    def _check_edge_events(self, sensors: List[int]):
+        """Check for edge detection events using raw proximity values."""
         if not sensors:
             return
 
-        if len(self.edge_filters) != len(sensors):
-            self.edge_filters = [1.0 for _ in sensors]
-
-        alpha = ALG.EDGE_EWMA_ALPHA
-        for i, reading in enumerate(sensors):
-            prev = self.edge_filters[i]
-            self.edge_filters[i] = alpha * reading + (1.0 - alpha) * prev
-
-        def pair_values(indices: tuple[int, int]):
-            filtered = []
-            raw = []
-            for idx in indices:
-                if idx < len(sensors):
-                    filtered.append(self.edge_filters[idx])
-                    raw.append(sensors[idx])
-            return filtered, raw
+        # Edge threshold: trigger when raw value goes below 15
+        EDGE_RAW_THRESHOLD = 15
 
         # Single sensor per side now
-        left_filtered = [self.edge_filters[I2C.LEFT_SENSOR_IDX]] if I2C.LEFT_SENSOR_IDX < len(self.edge_filters) else []
-        left_raw = [sensors[I2C.LEFT_SENSOR_IDX]] if I2C.LEFT_SENSOR_IDX < len(sensors) else []
-        right_filtered = [self.edge_filters[I2C.RIGHT_SENSOR_IDX]] if I2C.RIGHT_SENSOR_IDX < len(self.edge_filters) else []
-        right_raw = [sensors[I2C.RIGHT_SENSOR_IDX]] if I2C.RIGHT_SENSOR_IDX < len(sensors) else []
+        left_raw = sensors[I2C.LEFT_SENSOR_IDX] if I2C.LEFT_SENSOR_IDX < len(sensors) else 255
+        right_raw = sensors[I2C.RIGHT_SENSOR_IDX] if I2C.RIGHT_SENSOR_IDX < len(sensors) else 255
 
-        def is_off(filtered: List[float], raw: List[float]) -> bool:
-            if not filtered or not raw:
-                return False
-            avg = sum(filtered) / len(filtered)
-            min_raw = min(raw)
-            return (
-                avg <= ALG.EDGE_THRESH
-                and min_raw <= ALG.EDGE_THRESH * ALG.EDGE_RAW_HYST
-            )
-
-        left_off = is_off(left_filtered, left_raw)
-        right_off = is_off(right_filtered, right_raw)
+        # Check if sensor is off table (raw value < threshold)
+        left_off = left_raw < EDGE_RAW_THRESHOLD
+        right_off = right_raw < EDGE_RAW_THRESHOLD
 
         if left_off:
             self.edge_drop_counts["left"] += 1
