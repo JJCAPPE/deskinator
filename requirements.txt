@@ -1,16 +1,12 @@
+# Core dependencies (required)
 numpy>=1.26
 scipy>=1.13
 networkx>=3.2
 smbus2>=0.4
+
+# Optional visualization dependencies
 matplotlib>=3.7
 pyqtgraph>=0.13
 
-# Qt GUI backends (install separately as needed)
-# PyQt5>=5.15
-# PySide6>=6.6
-
-# Raspberry Pi / hardware support
+# Raspberry Pi / hardware support (Linux only)
 RPi.GPIO ; platform_system == "Linux"
-adafruit-circuitpython-bno08x>=1.0
-adafruit-circuitpython-motorkit>=1.6
-

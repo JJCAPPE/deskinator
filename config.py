@@ -64,7 +64,7 @@ class Geometry:
 
 @dataclass
 class Limits:
-    """Motion limits for NEMA17 + TMC2209 @ 12V, 1A — desk-safe."""
+    """Motion limits for NEMA17 + A4988 @ 12V, 1A — desk-safe."""
 
     V_MAX: float = 0.18  # m/s
     OMEGA_MAX: float = 1.8  # rad/s
