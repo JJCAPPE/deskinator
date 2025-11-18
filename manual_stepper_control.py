@@ -108,6 +108,10 @@ until another command is given or STOP (space) is pressed.
         # Current command multipliers (-1, 0, or +1 for v and omega)
         self._v_mult = 0
         self._omega_mult = 0
+        
+        # Track previous mode to detect mode transitions
+        self._prev_v_mult = 0
+        self._prev_omega_mult = 0
 
         # Current speed setting (0 to max_speed)
         self._speed = self._clip_speed(base_speed)
@@ -170,8 +174,26 @@ until another command is given or STOP (space) is pressed.
 
     def _set_command(self, v_mult: int, omega_mult: int):
         """Set velocity command multipliers."""
-        self._v_mult = int(v_mult)
-        self._omega_mult = int(omega_mult)
+        v_mult = int(v_mult)
+        omega_mult = int(omega_mult)
+        
+        # Detect mode transitions: switching between pure forward/backward and pure pivot
+        # Mode types: 0=stop, 1=pure linear (v != 0, omega == 0), 2=pure pivot (v == 0, omega != 0), 3=combined
+        prev_mode = self._get_mode_type(self._prev_v_mult, self._prev_omega_mult)
+        new_mode = self._get_mode_type(v_mult, omega_mult)
+        
+        # If transitioning between pure linear and pure pivot, reset velocities for clean transition
+        if prev_mode in (1, 2) and new_mode in (1, 2) and prev_mode != new_mode:
+            # Reset stepper velocities to allow immediate mode transition
+            with self._stepper.lock:
+                self._stepper.vL_current = 0.0
+                self._stepper.vR_current = 0.0
+        
+        self._prev_v_mult = self._v_mult
+        self._prev_omega_mult = self._omega_mult
+        self._v_mult = v_mult
+        self._omega_mult = omega_mult
+        
         print(
             f"\rV: {self._dir_label(self._v_mult)} | "
             f"Omega: {self._dir_label(self._omega_mult)} | "
@@ -179,6 +201,17 @@ until another command is given or STOP (space) is pressed.
             end="",
             flush=True,
         )
+    
+    def _get_mode_type(self, v_mult: int, omega_mult: int) -> int:
+        """Classify motion mode: 0=stop, 1=pure linear, 2=pure pivot, 3=combined."""
+        if v_mult == 0 and omega_mult == 0:
+            return 0  # stop
+        elif v_mult != 0 and omega_mult == 0:
+            return 1  # pure linear (forward/backward)
+        elif v_mult == 0 and omega_mult != 0:
+            return 2  # pure pivot
+        else:
+            return 3  # combined motion
 
     def _dir_label(self, multiplier: int) -> str:
         if multiplier > 0:
