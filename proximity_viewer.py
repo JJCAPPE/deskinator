@@ -70,32 +70,48 @@ class ProximityRig:
         self.channel_names = ["left", "right"]
 
         self.sensors: List[Optional[APDS9960]] = []
-        
+
         # Left sensor
         try:
             left_i2c = I2CBus(left_bus)
+            print(
+                f"Initializing LEFT sensor on bus {left_bus} (I2CBus bus_number={left_i2c.bus_number})"
+            )
             left_sensor = APDS9960(left_i2c, sensor_address)
             left_sensor.init()
             time.sleep(0.010)
             self.sensors.append(left_sensor)
+            print(f"  LEFT sensor initialized successfully")
         except Exception as exc:
-            print(f"Warning: failed to init left proximity sensor on bus {left_bus}: {exc}")
+            print(
+                f"Warning: failed to init left proximity sensor on bus {left_bus}: {exc}"
+            )
             self.sensors.append(None)
-        
+
         # Right sensor
         try:
             right_i2c = I2CBus(right_bus)
+            print(
+                f"Initializing RIGHT sensor on bus {right_bus} (I2CBus bus_number={right_i2c.bus_number})"
+            )
             right_sensor = APDS9960(right_i2c, sensor_address)
             right_sensor.init()
             time.sleep(0.010)
             self.sensors.append(right_sensor)
+            print(f"  RIGHT sensor initialized successfully")
         except Exception as exc:
-            print(f"Warning: failed to init right proximity sensor on bus {right_bus}: {exc}")
+            print(
+                f"Warning: failed to init right proximity sensor on bus {right_bus}: {exc}"
+            )
             self.sensors.append(None)
 
         gesture: Optional[GestureSensor]
         try:
+            print(f"Initializing GESTURE sensor on bus {gesture_bus}")
             gesture = GestureSensor(bus_number=gesture_bus, address=gesture_address)
+            print(
+                f"  GESTURE sensor initialized successfully (bus_number={gesture.bus_number})"
+            )
         except Exception as exc:
             print(f"Warning: failed to init gesture sensor: {exc}")
             gesture = None
@@ -298,7 +314,9 @@ class ProximityViewer(QtWidgets.QMainWindow):
         heights: List[float] = []
         parts = []
         for label, value, raw_value in zip(self.sensor_labels, readings, raw_readings):
-            if raw_value is None or (isinstance(raw_value, float) and not math.isfinite(raw_value)):
+            if raw_value is None or (
+                isinstance(raw_value, float) and not math.isfinite(raw_value)
+            ):
                 heights.append(0.0)
                 parts.append(f"{label}=-- (raw:--)")
             else:
@@ -404,7 +422,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             imu_address=args.imu_addr,
             imu_bus=I2C.IMU_BUS,
         )
-        print("\nStarting APDS calibration (place over table, then off edge when prompted)...")
+        print(
+            "\nStarting APDS calibration (place over table, then off edge when prompted)..."
+        )
         sensor_names = ["left", "right"]
         for name, sensor in zip(sensor_names, rig.sensors):
             if sensor is None:

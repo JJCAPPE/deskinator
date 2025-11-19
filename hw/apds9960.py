@@ -43,6 +43,7 @@ class APDS9960:
             return
 
         try:
+            print(f"APDS9960.init: Using bus {self.bus.bus_number}, address 0x{self.address:02X}")
             # Power on
             self.bus.write_byte_data(self.address, APDS9960_ENABLE, APDS9960_PON)
             time.sleep(0.05)
