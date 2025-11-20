@@ -143,28 +143,49 @@ class ProximityRig:
         values: List[Optional[float]] = []
         raw_values: List[Optional[int]] = []
 
-        for sensor in self.sensors:
-            if sensor is None:
+        # Read left sensor (bus 7 - software I2C)
+        if len(self.sensors) > 0 and self.sensors[0] is not None:
+            try:
+                raw = self.sensors[0].read_proximity_raw()
+                time.sleep(0.010)  # Delay for bus timing
+                reading = self.sensors[0].read_proximity_norm()
+                raw_values.append(raw)
+                values.append(reading)
+            except Exception as exc:
+                print(f"Warning: read error on left sensor: {exc}")
                 values.append(None)
                 raw_values.append(None)
-                continue
+        else:
+            values.append(None)
+            raw_values.append(None)
 
+        # Small delay when switching between buses (left=bus 7, right=bus 1)
+        time.sleep(0.010)
+
+        # Read right sensor (bus 1 - hardware I2C)
+        if len(self.sensors) > 1 and self.sensors[1] is not None:
             try:
-                raw = sensor.read_proximity_raw()
-                # Small delay between raw and normalized reads
-                time.sleep(0.005)
-                reading = sensor.read_proximity_norm()
+                raw = self.sensors[1].read_proximity_raw()
+                time.sleep(0.010)  # Delay for bus timing
+                reading = self.sensors[1].read_proximity_norm()
                 raw_values.append(raw)
+                values.append(reading)
             except Exception as exc:
-                print(f"Warning: read error on sensor: {exc}")
-                reading = None
+                print(f"Warning: read error on right sensor: {exc}")
+                values.append(None)
                 raw_values.append(None)
+        else:
+            values.append(None)
+            raw_values.append(None)
 
-            values.append(reading)
+        # Small delay when switching to gesture bus (bus 3 - software I2C)
+        time.sleep(0.010)
 
+        # Read gesture sensor (bus 3 - software I2C)
         if self.gesture is not None:
             try:
                 gesture_raw = self.gesture.read_proximity_raw()
+                time.sleep(0.010)  # Delay for bus timing
                 gesture_value = self.gesture.read_proximity_norm()
                 raw_values.append(gesture_raw)
             except Exception as exc:

@@ -43,7 +43,9 @@ class APDS9960:
             return
 
         try:
-            print(f"APDS9960.init: Using bus {self.bus.bus_number}, address 0x{self.address:02X}")
+            print(
+                f"APDS9960.init: Using bus {self.bus.bus_number}, address 0x{self.address:02X}"
+            )
             # Power on
             self.bus.write_byte_data(self.address, APDS9960_ENABLE, APDS9960_PON)
             time.sleep(0.05)
@@ -78,6 +80,8 @@ class APDS9960:
             return 0
 
         try:
+            # Small delay to ensure bus is ready (helps with timing differences between hardware/software I2C)
+            time.sleep(0.002)
             return int(self.bus.read_byte_data(self.address, APDS9960_PDATA))
         except Exception as e:
             print(f"APDS9960: Read error: {e}")
