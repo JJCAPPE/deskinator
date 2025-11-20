@@ -105,6 +105,12 @@ class ProximityRig:
             )
             self.sensors.append(None)
 
+        if right_bus == gesture_bus:
+            print(
+                f"Warning: Right sensor and Gesture sensor share bus {right_bus}. "
+                "They may conflict if they have the same address!"
+            )
+
         gesture: Optional[GestureSensor]
         try:
             print(f"Initializing GESTURE sensor on bus {gesture_bus}")
@@ -122,8 +128,9 @@ class ProximityRig:
             self.imu: Optional[MPU6050] = None
         else:
             try:
-                # Use separate bus for IMU if provided, otherwise use main bus (backward compat)
-                imu_bus_instance = I2CBus(imu_bus) if imu_bus is not None else self.bus
+                # Use separate bus for IMU if provided, otherwise fallback to default bus 1
+                bus_num = imu_bus if imu_bus is not None else 1
+                imu_bus_instance = I2CBus(bus_num)
                 self.imu = MPU6050(imu_bus_instance, imu_address)
             except Exception as exc:
                 print(

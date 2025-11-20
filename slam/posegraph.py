@@ -129,9 +129,22 @@ class PoseGraph:
         # Fix first pose (anchor)
         fixed_params = [0, 1, 2]
 
+        # Check if we have enough constraints
+        # Free variables: 3 * (len(node_ids) - 1) since first pose is fixed
+        # Residuals: 3 * len(self.edges_odom) + len(self.edges_yaw) + 3 * len(self.edges_loop)
+        n_free_vars = 3 * (len(node_ids) - 1)
+        n_residuals = (
+            3 * len(self.edges_odom)
+            + len(self.edges_yaw)
+            + 3 * len(self.edges_loop)
+        )
+
+        # Use 'trf' method if underconstrained, 'lm' otherwise
+        method = "trf" if n_residuals < n_free_vars else "lm"
+
         # Optimize
         result = least_squares(
-            self._residuals, x0, args=(node_ids,), method="lm", verbose=0
+            self._residuals, x0, args=(node_ids,), method=method, verbose=0
         )
 
         # Update poses
