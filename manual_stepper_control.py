@@ -382,7 +382,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Deskinator Control Center")
 
     # Drive Args
-    parser.add_argument("--speed", type=float, default=0.10, help="Base speed m/s")
+    parser.add_argument(
+        "--speed", type=float, default=LIMS.V_BASE, help="Base speed m/s"
+    )
     parser.add_argument(
         "--max-speed", type=float, default=LIMS.V_MAX, help="Max speed m/s"
     )
