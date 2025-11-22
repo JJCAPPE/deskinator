@@ -46,12 +46,10 @@ class RobotControlCenter(ProximityViewer):
         speed_step: float,
         interval_s: float = 0.05,  # 20Hz refresh for responsiveness
     ) -> None:
-        # Initialize the viewer part
-        super().__init__(rig, interval_s)
+        # Initialize all state variables BEFORE super().__init__ because super().__init__
+        # calls update_plot(), which relies on these variables being present.
+        
         self.stepper = stepper
-        self.setWindowTitle("Deskinator Control Center")
-
-        # Control Parameters
         self._base_speed = base_speed
         self._max_speed = max_speed
         self._speed_step = speed_step
@@ -68,6 +66,11 @@ class RobotControlCenter(ProximityViewer):
         self._edge_detected = False
         self._safety_override = False
 
+        # Now initialize the viewer part (which triggers the first update_plot)
+        super().__init__(rig, interval_s)
+        
+        self.setWindowTitle("Deskinator Control Center")
+        
         # Enhance UI
         self._init_control_ui()
 
