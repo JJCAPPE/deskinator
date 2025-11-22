@@ -81,7 +81,7 @@ class Algo:
     EDGE_THRESH: float = 0.5  # APDS off-table threshold (norm.)
     EDGE_RAW_THRESH: int = 20  # APDS off-table raw threshold (raw < 20 = off table)
     GESTURE_RAW_THRESH: int = (
-        50  # Gesture sensor start/stop trigger (raw > 50 = hand present)
+        30 # Gesture sensor start/stop trigger (raw > 50 = hand present)
     )
     EDGE_DEBOUNCE: float = 0.06  # s
     EDGE_EWMA_ALPHA: float = 0.35  # smoothing factor for proximity filtering
