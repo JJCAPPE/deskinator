@@ -78,8 +78,8 @@ until another command is given or STOP (space) is pressed.
 """
 
     COMMANDS = {
-        "w": (+1, 0),  # Forward (v > 0, omega = 0)
-        "s": (-1, 0),  # Backward (v < 0, omega = 0)
+        "w": (-1, 0),  # Forward (flipped: v < 0)
+        "s": (+1, 0),  # Backward (flipped: v > 0)
         "a": (0, +1),  # Pivot left (v = 0, omega > 0)
         "d": (0, -1),  # Pivot right (v = 0, omega < 0)
         "q": (+1, -1),  # Left forward (turn right)
