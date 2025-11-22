@@ -28,7 +28,7 @@ except ImportError as exc:
         "and dependencies are installed."
     ) from exc
 
-from config import LIMS, I2C
+from config import LIMS, I2C, ALG
 from hw.stepper import StepperDrive
 
 
@@ -65,6 +65,11 @@ class RobotControlCenter(ProximityViewer):
         # Safety State
         self._edge_detected = False
         self._safety_override = False
+        
+        # Gesture Pause State
+        self.is_paused = False
+        self.gesture_debounce_counter = 0
+        self.gesture_active_prev = False
 
         # Now initialize the viewer part (which triggers the first update_plot)
         super().__init__(rig, interval_s)
@@ -117,7 +122,7 @@ class RobotControlCenter(ProximityViewer):
         # Add help text at the bottom
         help_text = (
             "Controls: WASD (Move) | Q/E/Z/C (Turn) | SPACE (Stop)\n"
-            "+/- (Speed) | Safety: Stops FWD if sensor < 30"
+            "+/- (Speed) | Safety: Stops FWD if sensor < 30 | Gesture to Pause/Resume"
         )
         self.help_label = QtWidgets.QLabel(help_text)
         self.help_label.setAlignment(QtCore.Qt.AlignCenter)
@@ -168,6 +173,13 @@ class RobotControlCenter(ProximityViewer):
                     "color: white; background-color: red; padding: 5px;"
                 )
                 return
+            
+            # If paused, do not accept motion commands (except stop, implicitly handled by update_plot overriding)
+            # Actually, we let the command be set, but update_plot will override it if paused.
+            # This allows "pre-selecting" a direction, or resuming immediately if keys are held?
+            # Better to block if paused to avoid surprises.
+            if self.is_paused and (v_req != 0 or omega_req != 0):
+                 return
 
             self._set_command(v_req, omega_req)
 
@@ -184,25 +196,34 @@ class RobotControlCenter(ProximityViewer):
         self._v_mult = v_mult
         self._omega_mult = omega_mult
 
-        # Update UI Text
-        if v_mult == 0 and omega_mult == 0:
+        self._update_dir_label()
+
+    def _update_dir_label(self):
+        if self.is_paused:
+            text = "PAUSED"
+        elif self._v_mult == 0 and self._omega_mult == 0:
             text = "STOP"
-        elif v_mult > 0:
+        elif self._v_mult > 0:
             text = (
                 "FORWARD"
-                if omega_mult == 0
-                else ("FWD RIGHT" if omega_mult < 0 else "FWD LEFT")
+                if self._omega_mult == 0
+                else ("FWD RIGHT" if self._omega_mult < 0 else "FWD LEFT")
             )
-        elif v_mult < 0:
+        elif self._v_mult < 0:
             text = (
                 "BACKWARD"
-                if omega_mult == 0
-                else ("BACK RIGHT" if omega_mult < 0 else "BACK LEFT")
+                if self._omega_mult == 0
+                else ("BACK RIGHT" if self._omega_mult < 0 else "BACK LEFT")
             )
         else:  # v=0
-            text = "PIVOT RIGHT" if omega_mult < 0 else "PIVOT LEFT"
+            text = "PIVOT RIGHT" if self._omega_mult < 0 else "PIVOT LEFT"
 
-        self.dir_label.setText(text)
+        if hasattr(self, "dir_label"):
+            self.dir_label.setText(text)
+            if self.is_paused:
+                 self.dir_label.setStyleSheet("color: #ffaa00;")
+            else:
+                 self.dir_label.setStyleSheet("color: #eeeeee;")
 
     def _get_mode_type(self, v_mult: int, omega_mult: int) -> int:
         if v_mult == 0 and omega_mult == 0:
@@ -223,7 +244,8 @@ class RobotControlCenter(ProximityViewer):
         # 1. Call super to read sensors and update graph
         super().update_plot()
 
-        # 2. Check safety using cached readings from super().update_plot()
+        # 2. Check gesture and safety
+        self._check_gesture_toggle()
         self._check_safety()
 
         # 3. Update Stepper
@@ -234,6 +256,12 @@ class RobotControlCenter(ProximityViewer):
         # Clamp dt to avoid huge jumps if lag
         if dt > 0.1:
             dt = 0.05
+            
+        # Override commands if paused
+        if self.is_paused:
+            self.stepper.command(0, 0)
+            self.stepper.update(dt)
+            return
 
         # Enforce safety on current command
         if self._v_mult > 0 and self._edge_detected:
@@ -247,8 +275,7 @@ class RobotControlCenter(ProximityViewer):
         elif not self._edge_detected and hasattr(self, "dir_label") and "SAFETY" in self.dir_label.text():
             # Reset label color if safe again (but stay stopped until key press)
             if self._v_mult == 0 and self._omega_mult == 0:
-                self.dir_label.setText("STOP")
-                self.dir_label.setStyleSheet("color: #eeeeee;")
+                self._update_dir_label()
 
         # Compute commands
         v_cmd = self._v_mult * self._speed
@@ -258,19 +285,66 @@ class RobotControlCenter(ProximityViewer):
         self.stepper.command(v_cmd, omega_cmd)
         self.stepper.update(dt)
 
+    def _check_gesture_toggle(self):
+        """Check for gesture sensor toggle event."""
+        if not hasattr(self, "raw_readings") or self.raw_readings is None:
+            return
+
+        # Find gesture sensor index
+        # ProximityViewer labels: ["left", "right", "start_gesture"] usually
+        gesture_val = None
+        for label, val in zip(self.sensor_labels, self.raw_readings):
+            if label == "start_gesture":
+                gesture_val = val
+                break
+        
+        if gesture_val is None:
+            return
+            
+        # Check threshold (raw value)
+        # Ensure it's a number
+        if not isinstance(gesture_val, (int, float)):
+            return
+            
+        is_active = gesture_val > ALG.GESTURE_RAW_THRESH
+        
+        # Debounce: only trigger on rising edge after stable low
+        # Simple rising edge detection
+        if is_active and not self.gesture_active_prev:
+            self.gesture_debounce_counter += 1
+        elif not is_active:
+            self.gesture_debounce_counter = 0
+            
+        if self.gesture_debounce_counter > 2: # Require ~3 frames of active (~150ms)
+            # Toggle state
+            self.is_paused = not self.is_paused
+            print(f"[Control] Gesture detected! Paused: {self.is_paused}")
+            
+            # Reset counter to wait for release
+            # We set gesture_active_prev to True to block subsequent toggles until release
+            self.gesture_active_prev = True
+            
+            # Stop robot if pausing
+            if self.is_paused:
+                self._v_mult = 0
+                self._omega_mult = 0
+                self.stepper.command(0, 0)
+            
+            self._update_dir_label()
+            
+        if not is_active:
+            self.gesture_active_prev = False
+
     def _check_safety(self):
         """Analyze latest sensor data for edges."""
         # self.raw_readings is populated by super().update_plot()
         if not hasattr(self, "raw_readings") or self.raw_readings is None:
             return
 
-        limit = 30
+        limit = ALG.EDGE_RAW_THRESH
         is_unsafe = False
 
         # Check Left (Index 0) and Right (Index 1)
-        # We iterate carefully as list size depends on config
-        # ProximityViewer stores data in self.raw_readings corresponding to self.sensor_labels
-
         for label, val in zip(self.sensor_labels, self.raw_readings):
             if label in ["left", "right"]:
                 # val is None or int
@@ -332,7 +406,7 @@ def parse_args():
         default=I2C.ADDR_IMU,
     )
     parser.add_argument(
-        "--interval", type=float, default=0.02, help="Update interval (default 0.02s)"
+        "--interval", type=float, default=0.05, help="Update interval (default 0.05s)"
     )
 
     return parser.parse_args()
