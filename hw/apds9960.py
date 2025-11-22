@@ -13,11 +13,15 @@ APDS9960_ENABLE = 0x80
 APDS9960_PDATA = 0x9C
 APDS9960_CONTROL = 0x8F
 APDS9960_PPULSE = 0x8E
-APDS9960_CONFIG2 = 0x90
+APDS9960_GCONF1 = 0xA2
+APDS9960_GCONF2 = 0xA3
+APDS9960_GPULSE = 0xA6
+APDS9960_GCONF4 = 0xAB
 
 # Enable bits
 APDS9960_PON = 0x01  # Power on
 APDS9960_PEN = 0x04  # Proximity enable
+APDS9960_GEN = 0x40  # Gesture enable
 
 
 class APDS9960:
@@ -51,7 +55,20 @@ class APDS9960:
             self.bus.write_byte_data(self.address, APDS9960_ENABLE, APDS9960_PON)
             time.sleep(0.05)
 
-            # Configure proximity detection: PDRIVE = 100mA, PGAIN = 8x
+            # Configure gesture engine (matched to gesture.py)
+            # GMODE = 1 (gesture mode)
+            self.bus.write_byte_data(self.address, APDS9960_GCONF4, 0x01)
+
+            # Set gesture proximity entry threshold
+            self.bus.write_byte_data(self.address, APDS9960_GCONF1, 0x40)
+
+            # Set gesture exit persistence (4 gesture end)
+            self.bus.write_byte_data(self.address, APDS9960_GCONF2, 0x01)
+
+            # Set gesture LED drive strength and wait time
+            self.bus.write_byte_data(self.address, APDS9960_GPULSE, 0xC9)
+
+            # Configure proximity sensing for presence detection: PDRIVE = 100mA, PGAIN = 8x
             self.bus.write_byte_data(self.address, APDS9960_CONTROL, 0x2C)
 
             # Verify CONTROL register
@@ -71,7 +88,6 @@ class APDS9960:
 
             # Proximity pulse: 8 pulses, 32us length (matches gesture sensor)
             # 0x80 (PPLEN=32us) | 0x07 (PPULSE=8) = 0x87
-            # Previous was 0x8F (16us, 16 pulses)
             self.bus.write_byte_data(self.address, APDS9960_PPULSE, 0x87)
 
             # Verify PPULSE register
@@ -84,30 +100,12 @@ class APDS9960:
                 time.sleep(0.01)
                 self.bus.write_byte_data(self.address, APDS9960_PPULSE, 0x87)
 
-            # LED Boost (CONFIG2) - increases IR LED power
-            # 0x41 = LED_BOOST 300% (bit 6 set? no 0x40 is LED_BOOST 300%)
-            # Wait, 0x90 register CONFIG2.
-            # Bit 5:4 LED_BOOST. 00=100%, 01=150%, 10=200%, 11=300%.
-            # 0x41 ??
-            # Register 0x90 (CONFIG2).
-            # Bits 5:4 are LED_BOOST.
-            # 00 = 100%, 01 = 150%, 10 = 200%, 11 = 300%.
-            # User suggested 0x41.
-            # 0x41 = 0100 0001.
-            # Bit 6 is 1. Bit 0 is 1.
-            # Reserved bits are 7, 3:2.
-            # Bit 6 is PSIEN (Proximity Saturation Interrupt Enable).
-            # Bit 0, 1 are reserved/CPSIEN?
-            # Let's check datasheet or trust user.
-            # User said: "self.bus.write_byte_data(self.address, 0x90, 0x41)  # if values still very low, try 0x49"
-            # 0x40 is LED_BOOST=100%?? No.
-            # Let's trust the user's value 0x41 for now as they requested it.
-            self.bus.write_byte_data(self.address, APDS9960_CONFIG2, 0x41)
-
-            # Enable proximity detection
+            # Enable proximity and gesture (matched to gesture.py)
+            # gesture.py enables GEN | PEN. Even if we only need PEN, GEN might
+            # be required for stability on some clones or setups.
             enable = self.bus.read_byte_data(self.address, APDS9960_ENABLE)
             self.bus.write_byte_data(
-                self.address, APDS9960_ENABLE, enable | APDS9960_PEN
+                self.address, APDS9960_ENABLE, enable | APDS9960_GEN | APDS9960_PEN
             )
 
             time.sleep(0.1)
