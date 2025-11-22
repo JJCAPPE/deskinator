@@ -13,8 +13,6 @@ Usage examples::
     python3 proximity_viewer.py --interval 0.2
 """
 
-# TODO: The sensors are fucked
-
 from __future__ import annotations
 
 import argparse

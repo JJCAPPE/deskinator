@@ -65,6 +65,8 @@ class RobotControlCenter(ProximityViewer):
         # Safety State
         self._edge_detected = False
         self._safety_override = False
+        self._safe_left = True
+        self._safe_right = True
 
         # Gesture Pause State
         self.is_paused = False
@@ -119,10 +121,53 @@ class RobotControlCenter(ProximityViewer):
         # Insert at the top of the main VBoxLayout
         layout.insertWidget(0, self.control_frame)
 
+        # Keypad Visualization
+        self.keypad_frame = QtWidgets.QFrame()
+        self.keypad_frame.setStyleSheet("background-color: transparent;")
+        key_layout = QtWidgets.QGridLayout(self.keypad_frame)
+        key_layout.setSpacing(5)
+        key_layout.setContentsMargins(0, 5, 0, 5)
+
+        # Helper to create key labels
+        def create_key_label(text):
+            lbl = QtWidgets.QLabel(text)
+            lbl.setAlignment(QtCore.Qt.AlignCenter)
+            lbl.setFont(QtGui.QFont("Arial", 12, QtGui.QFont.Bold))
+            lbl.setFixedSize(60, 60)
+            lbl.setStyleSheet(
+                "background-color: #444; color: #aaa; border-radius: 4px; border: 1px solid #555;"
+            )
+            return lbl
+
+        self.key_w = create_key_label("W")
+        self.key_a = create_key_label("A")
+        self.key_s = create_key_label("S")
+        self.key_d = create_key_label("D")
+        self.key_pause = create_key_label("PAUSE")
+        self.key_pause.setFixedSize(190, 40)
+
+        # Grid placement:
+        #   W
+        # A S D
+        # PAUSE
+        key_layout.addWidget(self.key_w, 0, 1)
+        key_layout.addWidget(self.key_a, 1, 0)
+        key_layout.addWidget(self.key_s, 1, 1)
+        key_layout.addWidget(self.key_d, 1, 2)
+        key_layout.addWidget(self.key_pause, 2, 0, 1, 3, QtCore.Qt.AlignCenter)
+
+        # Center the keypad in a horizontal layout to keep it tidy
+        key_container = QtWidgets.QHBoxLayout()
+        key_container.addStretch()
+        key_container.addWidget(self.keypad_frame)
+        key_container.addStretch()
+
+        layout.insertLayout(1, key_container)
+
         # Add help text at the bottom
         help_text = (
             "Controls: WASD (Move) | Q/E/Z/C (Turn) | SPACE (Stop)\n"
-            "+/- (Speed) | Safety: Stops FWD if sensor < 30 | Gesture to Pause/Resume"
+            "+/- (Speed) | Safety: Stops FWD/Turn into void | Gesture to Pause/Resume"
         )
         self.help_label = QtWidgets.QLabel(help_text)
         self.help_label.setAlignment(QtCore.Qt.AlignCenter)
@@ -167,6 +212,7 @@ class RobotControlCenter(ProximityViewer):
             v_req, omega_req = cmd
 
             # Pre-check safety for new command
+            # Forward blocked if edge detected on EITHER side
             if v_req > 0 and self._edge_detected:
                 # Flash warning, refuse to set forward command
                 self.safety_label.setStyleSheet(
@@ -174,10 +220,15 @@ class RobotControlCenter(ProximityViewer):
                 )
                 return
 
-            # If paused, do not accept motion commands (except stop, implicitly handled by update_plot overriding)
-            # Actually, we let the command be set, but update_plot will override it if paused.
-            # This allows "pre-selecting" a direction, or resuming immediately if keys are held?
-            # Better to block if paused to avoid surprises.
+            # Turn blocked if unsafe direction
+            # Left turn (positive omega) unsafe if Left sensor triggered
+            if omega_req > 0 and not self._safe_left:
+                return
+            # Right turn (negative omega) unsafe if Right sensor triggered
+            if omega_req < 0 and not self._safe_right:
+                return
+
+            # If paused, do not accept motion commands (except stop)
             if self.is_paused and (v_req != 0 or omega_req != 0):
                 return
 
@@ -248,6 +299,9 @@ class RobotControlCenter(ProximityViewer):
         self._check_gesture_toggle()
         self._check_safety()
 
+        # 2b. Update UI visual state
+        self._update_ui_state()
+
         # 3. Update Stepper
         now = time.monotonic()
         dt = now - self.last_update_time
@@ -263,31 +317,122 @@ class RobotControlCenter(ProximityViewer):
             self.stepper.update(dt)
             return
 
-        # Enforce safety on current command
+        # Enforce safety on current command (in case safety changed while moving)
+        # Stop Forward
         if self._v_mult > 0 and self._edge_detected:
-            # Emergency Stop for forward motion
             self._v_mult = 0
-            self._omega_mult = 0
+            if self._omega_mult == 0:  # Stop turn if only moving fwd
+                # But if turning, check specific turn safety below
+                pass
+            # We force stop for forward component.
+            # However, to be safe and simple, usually stop everything on edge.
+            # But user wants nuanced turn control.
+            # If we are moving Forward-Left, and Left Edge is detected:
+            # Forward is unsafe. Left turn is unsafe.
+            # If we are moving Forward-Right, and Left Edge is detected:
+            # Forward is unsafe. Right turn is safe.
+
+            # Simply zero out the unsafe components
+            pass  # Logic handled below
+
+        # Zero out forward component if any edge detected
+        v_cmd_safe = self._v_mult * self._speed
+        if v_cmd_safe > 0 and self._edge_detected:
+            v_cmd_safe = 0
+
+        # Zero out turn component if specific side unsafe
+        omega_cmd_safe = self._omega_mult * self._omega_speed
+        if omega_cmd_safe > 0 and not self._safe_left:  # Left Turn
+            omega_cmd_safe = 0
+        if omega_cmd_safe < 0 and not self._safe_right:  # Right Turn
+            omega_cmd_safe = 0
+
+        # If we modified the command due to safety, update visual state/stop
+        if (v_cmd_safe == 0 and self._v_mult > 0) or (
+            omega_cmd_safe == 0 and self._omega_mult != 0
+        ):
+            # Update dir label if we are actively being stopped
             if hasattr(self, "dir_label"):
                 self.dir_label.setText("SAFETY STOP")
                 self.dir_label.setStyleSheet("color: red;")
-            self.stepper.command(0, 0)
         elif (
             not self._edge_detected
             and hasattr(self, "dir_label")
             and "SAFETY" in self.dir_label.text()
         ):
-            # Reset label color if safe again (but stay stopped until key press)
-            if self._v_mult == 0 and self._omega_mult == 0:
-                self._update_dir_label()
-
-        # Compute commands
-        v_cmd = self._v_mult * self._speed
-        omega_cmd = self._omega_mult * self._omega_speed
+            self._update_dir_label()
 
         # Send to stepper
-        self.stepper.command(v_cmd, omega_cmd)
+        self.stepper.command(v_cmd_safe, omega_cmd_safe)
         self.stepper.update(dt)
+
+    def _update_ui_state(self):
+        """Update colors of keypad buttons based on state."""
+        if not hasattr(self, "key_w"):
+            return
+
+        # Helper styles
+        style_idle = "background-color: #444; color: #aaa; border-radius: 4px; border: 1px solid #555;"
+        style_active = "background-color: #2e2; color: #000; border-radius: 4px; border: 1px solid #2f2;"
+        style_blocked = "background-color: #a33; color: #ccc; border-radius: 4px; border: 1px solid #c44;"  # Red-ish but visible text
+        style_pressed_blocked = "background-color: #f00; color: #fff; border-radius: 4px; border: 2px solid #fff;"  # Bright red
+
+        # Forward (W)
+        # Blocked if ANY edge detected
+        if self._edge_detected:
+            # If trying to move forward, show bright red
+            if self._v_mult > 0:
+                self.key_w.setStyleSheet(style_pressed_blocked)
+            else:
+                self.key_w.setStyleSheet(style_blocked)
+        else:
+            # Safe
+            if self._v_mult > 0:
+                self.key_w.setStyleSheet(style_active)
+            else:
+                self.key_w.setStyleSheet(style_idle)
+
+        # Back (S) - Always safe usually
+        if self._v_mult < 0:
+            self.key_s.setStyleSheet(style_active)
+        else:
+            self.key_s.setStyleSheet(style_idle)
+
+        # Left (A) - Blocked if Left Sensor Triggered
+        if not self._safe_left:
+            if self._omega_mult > 0:  # Trying to turn left
+                self.key_a.setStyleSheet(style_pressed_blocked)
+            else:
+                self.key_a.setStyleSheet(style_blocked)
+        else:
+            if self._omega_mult > 0:
+                self.key_a.setStyleSheet(style_active)
+            else:
+                self.key_a.setStyleSheet(style_idle)
+
+        # Right (D) - Blocked if Right Sensor Triggered
+        if not self._safe_right:
+            if self._omega_mult < 0:  # Trying to turn right
+                self.key_d.setStyleSheet(style_pressed_blocked)
+            else:
+                self.key_d.setStyleSheet(style_blocked)
+        else:
+            if self._omega_mult < 0:
+                self.key_d.setStyleSheet(style_active)
+            else:
+                self.key_d.setStyleSheet(style_idle)
+
+        # Pause
+        if self.is_paused:
+            self.key_pause.setStyleSheet(
+                "background-color: #ffaa00; color: #000; border-radius: 4px; font-weight: bold;"
+            )
+            self.key_pause.setText("RESUME (Gesture)")
+        else:
+            self.key_pause.setStyleSheet(
+                "background-color: #252525; color: #666; border-radius: 4px;"
+            )
+            self.key_pause.setText("PAUSE (Gesture)")
 
     def _check_gesture_toggle(self):
         """Check for gesture sensor toggle event."""
@@ -345,15 +490,23 @@ class RobotControlCenter(ProximityViewer):
 
         limit = ALG.EDGE_RAW_THRESH
         is_unsafe = False
+        safe_left = True
+        safe_right = True
 
         # Check Left (Index 0) and Right (Index 1)
         for label, val in zip(self.sensor_labels, self.raw_readings):
-            if label in ["left", "right"]:
-                # val is None or int
+            if label == "left":
                 if val is not None and isinstance(val, (int, float)) and val < limit:
                     is_unsafe = True
+                    safe_left = False
+            elif label == "right":
+                if val is not None and isinstance(val, (int, float)) and val < limit:
+                    is_unsafe = True
+                    safe_right = False
 
         self._edge_detected = is_unsafe
+        self._safe_left = safe_left
+        self._safe_right = safe_right
 
         if not hasattr(self, "safety_label"):
             return
