@@ -65,7 +65,7 @@ class Limits:
     """Motion limits for NEMA17 + A4988 @ 12V, 1A — desk-safe."""
 
     V_MAX: float = 0.18  # m/s
-    OMEGA_MAX: float = 2.4
+    OMEGA_MAX: float = 1.8  # rad/s
     A_MAX: float = 0.60  # m/s^2
     ALPHA_MAX: float = 4.0  # rad/s^2
     J_MAX: float = 4.0  # m/s^3

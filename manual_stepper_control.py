@@ -26,7 +26,9 @@ from typing import Optional
 
 try:
     from hw.stepper import StepperDrive
-    from config import GEOM, LIMS
+    from hw.apds9960 import APDS9960
+    from hw.i2c import I2CBus
+    from config import GEOM, LIMS, I2C
 except ImportError as exc:
     raise SystemExit(
         "Failed to import required modules. Make sure you're running from "
@@ -61,10 +63,6 @@ Controls:
   s : both wheels backward
   a : pivot left (left back, right forward)
   d : pivot right (left forward, right back)
-  q : left wheel forward
-  z : left wheel backward
-  e : right wheel forward
-  c : right wheel backward
   space : stop (zero velocity)
   x : exit
 
@@ -82,10 +80,6 @@ until another command is given or STOP (space) is pressed.
         "s": (-1, 0),  # Backward (v < 0, omega = 0)
         "a": (0, +1),  # Pivot left (v = 0, omega > 0)
         "d": (0, -1),  # Pivot right (v = 0, omega < 0)
-        "q": (+1, -1),  # Left forward (turn right)
-        "z": (-1, +1),  # Left backward (turn left)
-        "e": (+1, +1),  # Right forward (turn left)
-        "c": (-1, -1),  # Right backward (turn right)
     }
 
     def __init__(
@@ -108,13 +102,59 @@ until another command is given or STOP (space) is pressed.
         # Current command multipliers (-1, 0, or +1 for v and omega)
         self._v_mult = 0
         self._omega_mult = 0
-        
+
         # Track previous mode to detect mode transitions
         self._prev_v_mult = 0
         self._prev_omega_mult = 0
 
         # Current speed setting (0 to max_speed)
         self._speed = self._clip_speed(base_speed)
+
+        # Initialize safety sensors
+        self._sensors = []
+        self._init_sensors()
+        self._safety_triggered = False
+
+    def _init_sensors(self):
+        """Initialize front proximity sensors."""
+        # Left
+        try:
+            bus = I2CBus(I2C.LEFT_SENSOR_BUS)
+            s = APDS9960(bus, I2C.APDS_ADDR)
+            s.init()
+            self._sensors.append(s)
+            print(f"Left sensor initialized on bus {I2C.LEFT_SENSOR_BUS}")
+        except Exception as e:
+            print(f"Warning: Left sensor init failed: {e}")
+
+        # Right
+        try:
+            bus = I2CBus(I2C.RIGHT_SENSOR_BUS)
+            s = APDS9960(bus, I2C.APDS_ADDR)
+            s.init()
+            self._sensors.append(s)
+            print(f"Right sensor initialized on bus {I2C.RIGHT_SENSOR_BUS}")
+        except Exception as e:
+            print(f"Warning: Right sensor init failed: {e}")
+
+    def _check_safety(self) -> bool:
+        """Check if safe to move forward. Returns False if off table."""
+        if not self._sensors:
+            return True  # No sensors, assume safe
+
+        limit = 30
+        unsafe = False
+
+        # Check all initialized sensors
+        for s in self._sensors:
+            try:
+                val = s.read_proximity_raw()
+                if val < limit:
+                    unsafe = True
+            except Exception:
+                pass
+
+        return not unsafe
 
     def run(self):
         """Main interactive loop."""
@@ -128,6 +168,18 @@ until another command is given or STOP (space) is pressed.
         try:
             with RawTerminal(sys.stdin):
                 while True:
+                    # Check for periodic updates
+                    now = time.monotonic()
+                    if now >= next_update:
+                        # Safety check: if moving forward and edge detected, stop
+                        if self._v_mult > 0:
+                            if not self._check_safety():
+                                self._set_command(0, 0)
+                                print("\nSafety Stop! Edge detected.")
+
+                        self._update_stepper()
+                        next_update = now + dt
+
                     timeout = max(0.0, next_update - time.monotonic())
                     key = self._read_key(timeout)
 
@@ -150,15 +202,16 @@ until another command is given or STOP (space) is pressed.
                             continue
                         cmd = self.COMMANDS.get(key)
                         if cmd:
+                            # If command is forward, check safety first
+                            v_req, _ = cmd
+                            if v_req > 0:
+                                if not self._check_safety():
+                                    print("\nCannot move forward: Edge detected.")
+                                    continue
+
                             self._set_command(*cmd)
                         else:
                             print(f"\nUnmapped key: {repr(key)}")
-
-                    # Update stepper control
-                    now = time.monotonic()
-                    if now >= next_update:
-                        self._update_stepper()
-                        next_update = now + dt
 
         except KeyboardInterrupt:
             print("\nInterrupted by user")
@@ -176,24 +229,24 @@ until another command is given or STOP (space) is pressed.
         """Set velocity command multipliers."""
         v_mult = int(v_mult)
         omega_mult = int(omega_mult)
-        
+
         # Detect mode transitions: switching between pure forward/backward and pure pivot
         # Mode types: 0=stop, 1=pure linear (v != 0, omega == 0), 2=pure pivot (v == 0, omega != 0), 3=combined
         prev_mode = self._get_mode_type(self._prev_v_mult, self._prev_omega_mult)
         new_mode = self._get_mode_type(v_mult, omega_mult)
-        
+
         # If transitioning between pure linear and pure pivot, reset velocities for clean transition
         if prev_mode in (1, 2) and new_mode in (1, 2) and prev_mode != new_mode:
             # Reset stepper velocities to allow immediate mode transition
             with self._stepper.lock:
                 self._stepper.vL_current = 0.0
                 self._stepper.vR_current = 0.0
-        
+
         self._prev_v_mult = self._v_mult
         self._prev_omega_mult = self._omega_mult
         self._v_mult = v_mult
         self._omega_mult = omega_mult
-        
+
         print(
             f"\rV: {self._dir_label(self._v_mult)} | "
             f"Omega: {self._dir_label(self._omega_mult)} | "
@@ -201,7 +254,7 @@ until another command is given or STOP (space) is pressed.
             end="",
             flush=True,
         )
-    
+
     def _get_mode_type(self, v_mult: int, omega_mult: int) -> int:
         """Classify motion mode: 0=stop, 1=pure linear, 2=pure pivot, 3=combined."""
         if v_mult == 0 and omega_mult == 0:
@@ -226,9 +279,7 @@ until another command is given or STOP (space) is pressed.
             return
         new_speed = self._clip_speed(self._speed + delta)
         if abs(new_speed - self._speed) < 1e-6:
-            print(
-                f"\nSpeed already at limit ({self._speed:.3f} m/s)."
-            )
+            print(f"\nSpeed already at limit ({self._speed:.3f} m/s).")
             return
         self._speed = new_speed
         print(f"\nSpeed -> {self._speed:.3f} m/s (max: {self._max_speed:.3f} m/s)")
