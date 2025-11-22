@@ -7,6 +7,8 @@ Provides a GUI for driving the robot while monitoring proximity sensors
 and IMU data to prevent driving off the table.
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
 import time
@@ -14,17 +16,20 @@ from typing import Optional
 
 # Attempt to import Qt (prefer PyQt5 to match proximity_viewer, but handle both)
 try:
-    from PyQt5 import QtCore, QtWidgets, QtGui
+    from proximity_viewer import ProximityRig, ProximityViewer, _exec_app, QT_BACKEND
 
-    QT_BACKEND = "PyQt5"
-except ImportError:
-    from PySide6 import QtCore, QtWidgets, QtGui
-
-    QT_BACKEND = "PySide6"
+    if QT_BACKEND == "PyQt5":
+        from PyQt5 import QtCore, QtWidgets, QtGui
+    else:
+        from PySide6 import QtCore, QtWidgets, QtGui
+except ImportError as exc:
+    raise SystemExit(
+        "Failed to import required modules. Ensure proximity_viewer.py is in the path "
+        "and dependencies are installed."
+    ) from exc
 
 from config import LIMS, I2C
 from hw.stepper import StepperDrive
-from proximity_viewer import ProximityRig, ProximityViewer, _exec_app
 
 
 class RobotControlCenter(ProximityViewer):
@@ -39,8 +44,9 @@ class RobotControlCenter(ProximityViewer):
         base_speed: float,
         max_speed: float,
         speed_step: float,
-        interval_s: float = 0.1,
+        interval_s: float = 0.05,  # 20Hz refresh for responsiveness
     ) -> None:
+        # Initialize the viewer part
         super().__init__(rig, interval_s)
         self.stepper = stepper
         self.setWindowTitle("Deskinator Control Center")
@@ -56,6 +62,7 @@ class RobotControlCenter(ProximityViewer):
         self._v_mult = 0
         self._omega_mult = 0
         self._omega_speed = LIMS.OMEGA_MAX * 0.5
+        self.last_update_time = time.monotonic()
 
         # Safety State
         self._edge_detected = False
@@ -63,11 +70,6 @@ class RobotControlCenter(ProximityViewer):
 
         # Enhance UI
         self._init_control_ui()
-
-        # Stepper Control Loop Timer (50 Hz)
-        self.control_timer = QtCore.QTimer(self)
-        self.control_timer.timeout.connect(self._update_control_loop)
-        self.control_timer.start(20)  # 20ms = 50Hz
 
     def _init_control_ui(self):
         """Insert drive control widgets into the existing layout."""
@@ -167,7 +169,15 @@ class RobotControlCenter(ProximityViewer):
             self._set_command(v_req, omega_req)
 
     def _set_command(self, v_mult, omega_mult):
-        # Update state
+        # Detect mode transitions (logic from original script)
+        prev_mode = self._get_mode_type(self._v_mult, self._omega_mult)
+        new_mode = self._get_mode_type(v_mult, omega_mult)
+
+        if prev_mode in (1, 2) and new_mode in (1, 2) and prev_mode != new_mode:
+            with self.stepper.lock:
+                self.stepper.vL_current = 0.0
+                self.stepper.vR_current = 0.0
+
         self._v_mult = v_mult
         self._omega_mult = omega_mult
 
@@ -191,16 +201,36 @@ class RobotControlCenter(ProximityViewer):
 
         self.dir_label.setText(text)
 
+    def _get_mode_type(self, v_mult: int, omega_mult: int) -> int:
+        if v_mult == 0 and omega_mult == 0:
+            return 0
+        elif v_mult != 0 and omega_mult == 0:
+            return 1
+        elif v_mult == 0 and omega_mult != 0:
+            return 2
+        else:
+            return 3
+
     def _adjust_speed(self, delta: float):
         new_speed = max(self._min_speed, min(self._max_speed, self._speed + delta))
         self._speed = new_speed
         self.speed_label.setText(f"{self._speed:.2f} m/s")
 
-    def _update_control_loop(self):
-        """Runs at 50Hz to update stepper and check safety."""
+    def update_plot(self) -> None:
+        # 1. Call super to read sensors and update graph
+        super().update_plot()
 
-        # Check safety using cached readings from ProximityViewer (updated at ~10Hz)
+        # 2. Check safety using cached readings from super().update_plot()
         self._check_safety()
+
+        # 3. Update Stepper
+        now = time.monotonic()
+        dt = now - self.last_update_time
+        self.last_update_time = now
+
+        # Clamp dt to avoid huge jumps if lag
+        if dt > 0.1:
+            dt = 0.05
 
         # Enforce safety on current command
         if self._v_mult > 0 and self._edge_detected:
@@ -209,8 +239,12 @@ class RobotControlCenter(ProximityViewer):
             self._omega_mult = 0
             self.dir_label.setText("SAFETY STOP")
             self.dir_label.setStyleSheet("color: red;")
-        elif not self._edge_detected:
-            self.dir_label.setStyleSheet("color: #eeeeee;")
+            self.stepper.command(0, 0)
+        elif not self._edge_detected and "SAFETY" in self.dir_label.text():
+            # Reset label color if safe again (but stay stopped until key press)
+            if self._v_mult == 0 and self._omega_mult == 0:
+                self.dir_label.setText("STOP")
+                self.dir_label.setStyleSheet("color: #eeeeee;")
 
         # Compute commands
         v_cmd = self._v_mult * self._speed
@@ -218,30 +252,26 @@ class RobotControlCenter(ProximityViewer):
 
         # Send to stepper
         self.stepper.command(v_cmd, omega_cmd)
-        self.stepper.update(0.02)
+        self.stepper.update(dt)
 
     def _check_safety(self):
         """Analyze latest sensor data for edges."""
-        # self.last_raw_readings is maintained by ProximityViewer.update_plot()
-        if self.last_raw_readings is None:
+        # self.raw_readings is populated by super().update_plot()
+        if not hasattr(self, "raw_readings") or self.raw_readings is None:
             return
 
         limit = 30
         is_unsafe = False
 
-        # ProximityRig.read() returns [Left, Right, Gesture] (if active)
-        # Check Left (Index 0)
-        if len(self.last_raw_readings) > 0:
-            val = self.last_raw_readings[0]
-            # val is None if sensor disabled/error
-            if val is not None and val < limit:
-                is_unsafe = True
+        # Check Left (Index 0) and Right (Index 1)
+        # We iterate carefully as list size depends on config
+        # ProximityViewer stores data in self.raw_readings corresponding to self.sensor_labels
 
-        # Check Right (Index 1)
-        if len(self.last_raw_readings) > 1:
-            val = self.last_raw_readings[1]
-            if val is not None and val < limit:
-                is_unsafe = True
+        for label, val in zip(self.sensor_labels, self.raw_readings):
+            if label in ["left", "right"]:
+                # val is None or int
+                if val is not None and isinstance(val, (int, float)) and val < limit:
+                    is_unsafe = True
 
         self._edge_detected = is_unsafe
 
@@ -260,7 +290,9 @@ class RobotControlCenter(ProximityViewer):
         """Stop motors when window is closed."""
         self.stepper.stop()
         self.stepper.stop_pulse_generation()
-        event.accept()
+        super().closeEvent(
+            event
+        )  # This will call rig.close() via the app connection usually, but good to be safe
 
 
 def parse_args():
@@ -293,7 +325,7 @@ def parse_args():
         default=I2C.ADDR_IMU,
     )
     parser.add_argument(
-        "--interval", type=float, default=0.1, help="Sensor update interval"
+        "--interval", type=float, default=0.02, help="Update interval (default 0.02s)"
     )
 
     return parser.parse_args()
@@ -343,6 +375,7 @@ def main():
         print("Cleaning up...")
         stepper.stop()
         stepper.stop_pulse_generation()
+        # rig.close() is handled by app.aboutToQuit or rig destructor
 
 
 if __name__ == "__main__":

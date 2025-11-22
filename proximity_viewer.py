@@ -269,7 +269,7 @@ class ProximityViewer(QtWidgets.QMainWindow):
         super().__init__()
 
         self.rig = rig
-        self.interval_s = max(0.05, interval_s)
+        self.interval_s = max(0.01, interval_s)
 
         self.sensor_labels = list(rig.channel_names) + ["start_gesture"]
         self.has_imu = self.rig.imu is not None
@@ -355,18 +355,16 @@ class ProximityViewer(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self.update_plot)
         self.timer.start(int(self.interval_s * 1000))
 
-        self.last_readings = None
-        self.last_raw_readings = None
         self.update_plot()
 
     def update_plot(self) -> None:
-        readings, raw_readings = self.rig.read()
-        self.last_readings = readings
-        self.last_raw_readings = raw_readings
+        self.readings, self.raw_readings = self.rig.read()
 
         heights: List[float] = []
         parts = []
-        for label, value, raw_value in zip(self.sensor_labels, readings, raw_readings):
+        for label, value, raw_value in zip(
+            self.sensor_labels, self.readings, self.raw_readings
+        ):
             if raw_value is None or (
                 isinstance(raw_value, float) and not math.isfinite(raw_value)
             ):
