@@ -55,7 +55,16 @@ class APDS9960:
             self.i2c = I2C(self.bus_number)
 
             # Initialize the sensor
-            self.sensor = AdafruitAPDS9960(self.i2c, address=self.address)
+            # Note: address argument might not be supported in all versions of the library or wrapper
+            try:
+                self.sensor = AdafruitAPDS9960(self.i2c, address=self.address)
+            except TypeError:
+                # Fallback for versions/wrappers that don't accept address in init
+                # or if it's hardcoded to default 0x39 in the lib
+                if self.address != 0x39:
+                    print(f"Warning: Library might not support custom address 0x{self.address:02X}")
+                self.sensor = AdafruitAPDS9960(self.i2c)
+            
             self.sensor.enable_proximity = True
 
             # Note: The Adafruit library handles configuration.
