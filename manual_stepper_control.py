@@ -48,7 +48,7 @@ class RobotControlCenter(ProximityViewer):
     ) -> None:
         # Initialize all state variables BEFORE super().__init__ because super().__init__
         # calls update_plot(), which relies on these variables being present.
-        
+
         self.stepper = stepper
         self._base_speed = base_speed
         self._max_speed = max_speed
@@ -65,7 +65,7 @@ class RobotControlCenter(ProximityViewer):
         # Safety State
         self._edge_detected = False
         self._safety_override = False
-        
+
         # Gesture Pause State
         self.is_paused = False
         self.gesture_debounce_counter = 0
@@ -73,9 +73,9 @@ class RobotControlCenter(ProximityViewer):
 
         # Now initialize the viewer part (which triggers the first update_plot)
         super().__init__(rig, interval_s)
-        
+
         self.setWindowTitle("Deskinator Control Center")
-        
+
         # Enhance UI
         self._init_control_ui()
 
@@ -173,13 +173,13 @@ class RobotControlCenter(ProximityViewer):
                     "color: white; background-color: red; padding: 5px;"
                 )
                 return
-            
+
             # If paused, do not accept motion commands (except stop, implicitly handled by update_plot overriding)
             # Actually, we let the command be set, but update_plot will override it if paused.
             # This allows "pre-selecting" a direction, or resuming immediately if keys are held?
             # Better to block if paused to avoid surprises.
             if self.is_paused and (v_req != 0 or omega_req != 0):
-                 return
+                return
 
             self._set_command(v_req, omega_req)
 
@@ -221,9 +221,9 @@ class RobotControlCenter(ProximityViewer):
         if hasattr(self, "dir_label"):
             self.dir_label.setText(text)
             if self.is_paused:
-                 self.dir_label.setStyleSheet("color: #ffaa00;")
+                self.dir_label.setStyleSheet("color: #ffaa00;")
             else:
-                 self.dir_label.setStyleSheet("color: #eeeeee;")
+                self.dir_label.setStyleSheet("color: #eeeeee;")
 
     def _get_mode_type(self, v_mult: int, omega_mult: int) -> int:
         if v_mult == 0 and omega_mult == 0:
@@ -256,7 +256,7 @@ class RobotControlCenter(ProximityViewer):
         # Clamp dt to avoid huge jumps if lag
         if dt > 0.1:
             dt = 0.05
-            
+
         # Override commands if paused
         if self.is_paused:
             self.stepper.command(0, 0)
@@ -272,7 +272,11 @@ class RobotControlCenter(ProximityViewer):
                 self.dir_label.setText("SAFETY STOP")
                 self.dir_label.setStyleSheet("color: red;")
             self.stepper.command(0, 0)
-        elif not self._edge_detected and hasattr(self, "dir_label") and "SAFETY" in self.dir_label.text():
+        elif (
+            not self._edge_detected
+            and hasattr(self, "dir_label")
+            and "SAFETY" in self.dir_label.text()
+        ):
             # Reset label color if safe again (but stay stopped until key press)
             if self._v_mult == 0 and self._omega_mult == 0:
                 self._update_dir_label()
@@ -297,43 +301,41 @@ class RobotControlCenter(ProximityViewer):
             if label == "start_gesture":
                 gesture_val = val
                 break
-        
+
         if gesture_val is None:
             return
-            
+
         # Check threshold (raw value)
         # Ensure it's a number
         if not isinstance(gesture_val, (int, float)):
             return
-            
+
         is_active = gesture_val > ALG.GESTURE_RAW_THRESH
-        
-        # Debounce: only trigger on rising edge after stable low
-        # Simple rising edge detection
-        if is_active and not self.gesture_active_prev:
+
+        # Debounce logic
+        if is_active:
             self.gesture_debounce_counter += 1
-        elif not is_active:
+        else:
             self.gesture_debounce_counter = 0
-            
-        if self.gesture_debounce_counter > 2: # Require ~3 frames of active (~150ms)
+            self.gesture_active_prev = False
+
+        if (
+            self.gesture_debounce_counter > 2 and not self.gesture_active_prev
+        ):  # Require ~3 frames of active (~150ms)
             # Toggle state
             self.is_paused = not self.is_paused
             print(f"[Control] Gesture detected! Paused: {self.is_paused}")
-            
-            # Reset counter to wait for release
-            # We set gesture_active_prev to True to block subsequent toggles until release
+
+            # Latch to prevent multiple toggles while hand is held
             self.gesture_active_prev = True
-            
+
             # Stop robot if pausing
             if self.is_paused:
                 self._v_mult = 0
                 self._omega_mult = 0
                 self.stepper.command(0, 0)
-            
+
             self._update_dir_label()
-            
-        if not is_active:
-            self.gesture_active_prev = False
 
     def _check_safety(self):
         """Analyze latest sensor data for edges."""
