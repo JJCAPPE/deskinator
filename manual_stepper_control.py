@@ -237,10 +237,11 @@ class RobotControlCenter(ProximityViewer):
             # Emergency Stop for forward motion
             self._v_mult = 0
             self._omega_mult = 0
-            self.dir_label.setText("SAFETY STOP")
-            self.dir_label.setStyleSheet("color: red;")
+            if hasattr(self, "dir_label"):
+                self.dir_label.setText("SAFETY STOP")
+                self.dir_label.setStyleSheet("color: red;")
             self.stepper.command(0, 0)
-        elif not self._edge_detected and "SAFETY" in self.dir_label.text():
+        elif not self._edge_detected and hasattr(self, "dir_label") and "SAFETY" in self.dir_label.text():
             # Reset label color if safe again (but stay stopped until key press)
             if self._v_mult == 0 and self._omega_mult == 0:
                 self.dir_label.setText("STOP")
@@ -274,6 +275,9 @@ class RobotControlCenter(ProximityViewer):
                     is_unsafe = True
 
         self._edge_detected = is_unsafe
+
+        if not hasattr(self, "safety_label"):
+            return
 
         if is_unsafe:
             self.safety_label.setText("EDGE DETECTED")
