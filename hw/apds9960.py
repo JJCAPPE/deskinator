@@ -53,8 +53,27 @@ class APDS9960:
             # Configure proximity detection: PDRIVE = 100mA, PGAIN = 8x
             self.bus.write_byte_data(self.address, APDS9960_CONTROL, 0x2C)
 
+            # Verify CONTROL register
+            ctl = self.bus.read_byte_data(self.address, APDS9960_CONTROL)
+            if ctl != 0x2C:
+                print(f"APDS9960 Warning: CONTROL register mismatch! Expected 0x2C, got 0x{ctl:02X}")
+                # Retry once
+                time.sleep(0.01)
+                self.bus.write_byte_data(self.address, APDS9960_CONTROL, 0x2C)
+                ctl = self.bus.read_byte_data(self.address, APDS9960_CONTROL)
+                if ctl != 0x2C:
+                    print(f"APDS9960 Error: CONTROL register failed to set! Got 0x{ctl:02X}")
+
             # Proximity pulse: 16 pulses, 16us length
             self.bus.write_byte_data(self.address, APDS9960_PPULSE, 0x8F)
+
+            # Verify PPULSE register
+            pulse = self.bus.read_byte_data(self.address, APDS9960_PPULSE)
+            if pulse != 0x8F:
+                print(f"APDS9960 Warning: PPULSE register mismatch! Expected 0x8F, got 0x{pulse:02X}")
+                # Retry once
+                time.sleep(0.01)
+                self.bus.write_byte_data(self.address, APDS9960_PPULSE, 0x8F)
 
             # Enable proximity detection
             enable = self.bus.read_byte_data(self.address, APDS9960_ENABLE)
