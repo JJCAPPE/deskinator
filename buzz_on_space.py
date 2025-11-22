@@ -49,7 +49,7 @@ def main():
             
             if key == ' ':
                 if not MOCK_MODE and pwm:
-                    pwm.ChangeDutyCycle(50)  # 50% duty cycle for sound
+                    pwm.ChangeDutyCycle(100)  # 50% duty cycle for sound
                     time.sleep(0.1)          # Buzz for 100ms
                     pwm.ChangeDutyCycle(0)   # Silence
                 else:
