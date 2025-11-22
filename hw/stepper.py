@@ -120,8 +120,9 @@ class StepperDrive:
 
         with self.lock:
             # Convert to wheel velocities
-            vL_target = v - 0.5 * omega * GEOM.WHEEL_BASE
-            vR_target = v + 0.5 * omega * GEOM.WHEEL_BASE
+            # Note: LEFT pins control physical RIGHT wheel, RIGHT pins control physical LEFT wheel
+            vL_target = v + 0.5 * omega * GEOM.WHEEL_BASE
+            vR_target = v - 0.5 * omega * GEOM.WHEEL_BASE
 
             # Invert right wheel direction: RIGHT pins control physical left wheel
             # which has reversed direction
