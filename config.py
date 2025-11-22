@@ -27,10 +27,10 @@ class Pins:
 class I2CParams:
     """I2C bus configuration and device addresses."""
 
-    BUS: int = 1  # Left  (hardware I2C on GPIO2/GPIO3)
+    BUS: int = 1  # Gesture (hardware I2C on GPIO2/GPIO3)
     IMU_BUS: int = 5  # I2C bus for IMU (software I2C on GPIO 6/13)
-    GESTURE_BUS: int = 1  # I2C bus for gesture sensor (software I2C on GPIO 15/14)
-    RIGHT_SENSOR_BUS: int = 3  # Right APDS9960 sensor (hardware I2C on GPIO2/GPIO3)
+    GESTURE_BUS: int = 1  # I2C bus for gesture sensor (software I2C on GPIO 2/3 )
+    RIGHT_SENSOR_BUS: int = 3  # Right APDS9960 sensor (hardware I2C on GPIO24/GPIO25)
     LEFT_SENSOR_BUS: int = 7  # Left APDS9960 sensor (software I2C on GPIO19/GPIO26)
     ADDR_IMU: int = 0x68  # MPU-6050 detected (AD0 low)
     APDS_ADDR: int = 0x39  # APDS9960 default

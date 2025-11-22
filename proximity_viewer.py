@@ -123,13 +123,15 @@ class ProximityRig:
                 "They may conflict if they have the same address!"
             )
 
-        self.gesture: Optional[GestureSensor] = None
+        self.gesture: Optional[APDS9960] = None
         if "G" in self.active_sensors:
             try:
                 print(f"Initializing GESTURE sensor on bus {gesture_bus}")
-                gesture = GestureSensor(bus_number=gesture_bus, address=gesture_address)
+                gesture_i2c = I2CBus(gesture_bus)
+                gesture = APDS9960(gesture_i2c, gesture_address)
+                gesture.init()
                 print(
-                    f"  GESTURE sensor initialized successfully (bus_number={gesture.bus_number})"
+                    f"  GESTURE sensor initialized successfully (bus_number={gesture_i2c.bus_number})"
                 )
                 self.gesture = gesture
             except Exception as exc:
@@ -247,17 +249,26 @@ class ProximityRig:
     def close(self) -> None:
         """Release I2C resources."""
 
-        if hasattr(self.gesture, "bus") and getattr(self.gesture, "bus", None):
-            try:
-                self.gesture.bus.close()  # type: ignore[attr-defined]
-            except Exception:
-                pass
+        # Close gesture sensor if it's an APDS9960 instance
+        if self.gesture is not None:
+            # If using the new APDS9960 class which wraps I2CBus
+            if hasattr(self.gesture, "bus_wrapper"):
+                try:
+                    self.gesture.bus_wrapper.close()
+                except Exception:
+                    pass
+            # Fallback for old GestureSensor class if reverted
+            elif hasattr(self.gesture, "bus") and getattr(self.gesture, "bus", None):
+                try:
+                    self.gesture.bus.close()  # type: ignore
+                except Exception:
+                    pass
 
         # Close I2C buses for sensors
         for sensor in self.sensors:
-            if sensor is not None and hasattr(sensor, "bus"):
+            if sensor is not None and hasattr(sensor, "bus_wrapper"):
                 try:
-                    sensor.bus.close()  # type: ignore[attr-defined]
+                    sensor.bus_wrapper.close()
                 except Exception:
                     pass
 
