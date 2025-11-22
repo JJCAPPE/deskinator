@@ -25,7 +25,6 @@ from hw.apds9960 import APDS9960
 from hw.mpu6050 import MPU6050
 from hw.stepper import StepperDrive
 from hw.buzzer import Buzzer
-from hw.gesture import GestureSensor
 
 
 class Colors:
@@ -95,10 +94,10 @@ def test_i2c_bus() -> Tuple[bool, I2CBus]:
 
         # Check for expected devices
         expected_mux = I2C_CONFIG.ADDR_MUX
-        if expected_mux in devices:
-            print_info(f"✓ TCA9548A multiplexer detected at 0x{expected_mux:02X}")
-        else:
-            print_warn(f"TCA9548A not found at expected address 0x{expected_mux:02X}")
+        if hasattr(I2C_CONFIG, 'ADDR_MUX') and expected_mux in devices:
+             print_info(f"✓ TCA9548A multiplexer detected at 0x{expected_mux:02X}")
+        elif hasattr(I2C_CONFIG, 'ADDR_MUX'):
+             print_warn(f"TCA9548A not found at expected address 0x{expected_mux:02X}")
 
         if I2C_CONFIG.ADDR_IMU and I2C_CONFIG.ADDR_IMU in devices:
             print_info(f"✓ MPU-6050 IMU detected at 0x{I2C_CONFIG.ADDR_IMU:02X}")
@@ -111,6 +110,10 @@ def test_i2c_bus() -> Tuple[bool, I2CBus]:
 
 def test_multiplexer(bus: I2CBus) -> Tuple[bool, TCA9548A]:
     """Test TCA9548A I2C multiplexer."""
+    # Skip if no mux configured
+    if not hasattr(I2C_CONFIG, 'ADDR_MUX'):
+         return True, None
+
     print_header("TCA9548A MULTIPLEXER TEST")
 
     print_test("Initializing TCA9548A")
@@ -142,6 +145,9 @@ def test_multiplexer(bus: I2CBus) -> Tuple[bool, TCA9548A]:
 
 def test_proximity_sensors(bus: I2CBus, mux: TCA9548A) -> bool:
     """Test all 4 APDS9960 proximity sensors through multiplexer."""
+    if not hasattr(I2C_CONFIG, 'MUX_CHANS'):
+         return True
+         
     print_header("APDS9960 PROXIMITY SENSORS TEST")
 
     channels = I2C_CONFIG.MUX_CHANS
@@ -368,7 +374,9 @@ def test_gesture_sensor() -> bool:
 
     print_test("Initializing gesture sensor")
     try:
-        gesture = GestureSensor(I2C_CONFIG.GESTURE_BUS, I2C_CONFIG.GESTURE_ADDR)
+        gesture_i2c = I2CBus(I2C_CONFIG.GESTURE_BUS)
+        gesture = APDS9960(gesture_i2c, I2C_CONFIG.GESTURE_ADDR)
+        gesture.init()
         print_pass(f"I2C pins: SDA=GPIO{PINS.GESTURE_SDA}, SCL=GPIO{PINS.GESTURE_SCL}")
     except Exception as e:
         print_fail(f"Error: {e}")
@@ -380,13 +388,16 @@ def test_gesture_sensor() -> bool:
 
     trigger_count = 0
     hand_active = False
+    
+    # Hardcoded threshold for test (matches config generally)
+    GESTURE_THRESH = 50
 
     try:
         start_time = time.time()
 
         while time.time() - start_time < 10.0:
-            present = gesture.is_hand_present()
-            raw = gesture.last_proximity_raw
+            raw = gesture.read_proximity_raw()
+            present = raw > GESTURE_THRESH
 
             if present and not hand_active:
                 trigger_count += 1
@@ -395,7 +406,7 @@ def test_gesture_sensor() -> bool:
                 )
                 hand_active = True
             elif not present and hand_active:
-                print("  Hand removed")
+                print(f"  Hand removed (raw={raw})")
                 hand_active = False
 
             time.sleep(0.05)
@@ -412,12 +423,17 @@ def test_gesture_sensor() -> bool:
         print("  - Requires software I2C on GPIO17/GPIO4")
         print("  - See HARDWARE_SETUP.md for I2C configuration\n")
 
-        gesture.cleanup()
+        if hasattr(gesture, "bus_wrapper"):
+             gesture.bus_wrapper.close()
         return True
 
     except Exception as e:
         print_fail(f"Error during gesture test: {e}")
-        gesture.cleanup()
+        if hasattr(gesture, "bus_wrapper"):
+             try:
+                 gesture.bus_wrapper.close()
+             except:
+                 pass
         return False
 
 
@@ -468,18 +484,19 @@ def main():
         test_summary(results)
         return 1
 
-    # Test multiplexer
-    mux_ok, mux = test_multiplexer(bus)
-    results["TCA9548A Multiplexer"] = mux_ok
-
-    # Test proximity sensors (only if multiplexer works)
-    if mux_ok and mux:
-        prox_ok = test_proximity_sensors(bus, mux)
-        results["APDS9960 Sensors"] = prox_ok
-    else:
-        print_warn("Skipping proximity sensor tests (multiplexer failed)")
-        results["APDS9960 Sensors"] = False
-
+    # Test multiplexer (skipped if not configured)
+    if hasattr(I2C_CONFIG, 'ADDR_MUX'):
+        mux_ok, mux = test_multiplexer(bus)
+        results["TCA9548A Multiplexer"] = mux_ok
+        
+        # Test proximity sensors (only if multiplexer works)
+        if mux_ok and mux:
+            prox_ok = test_proximity_sensors(bus, mux)
+            results["APDS9960 Sensors"] = prox_ok
+        else:
+            print_warn("Skipping proximity sensor tests (multiplexer failed)")
+            results["APDS9960 Sensors"] = False
+    
     # Test IMU (on separate bus 5)
     imu_bus = I2CBus(I2C_CONFIG.IMU_BUS)
     imu_ok = test_imu(imu_bus)

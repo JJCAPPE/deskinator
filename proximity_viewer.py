@@ -44,7 +44,6 @@ import pyqtgraph as pg
 
 from config import I2C
 from hw.apds9960 import APDS9960
-from hw.gesture import GestureSensor
 from hw.i2c import I2CBus
 from hw.mpu6050 import MPU6050
 
@@ -249,20 +248,12 @@ class ProximityRig:
     def close(self) -> None:
         """Release I2C resources."""
 
-        # Close gesture sensor if it's an APDS9960 instance
-        if self.gesture is not None:
-            # If using the new APDS9960 class which wraps I2CBus
-            if hasattr(self.gesture, "bus_wrapper"):
-                try:
-                    self.gesture.bus_wrapper.close()
-                except Exception:
-                    pass
-            # Fallback for old GestureSensor class if reverted
-            elif hasattr(self.gesture, "bus") and getattr(self.gesture, "bus", None):
-                try:
-                    self.gesture.bus.close()  # type: ignore
-                except Exception:
-                    pass
+        # Close gesture sensor
+        if self.gesture is not None and hasattr(self.gesture, "bus_wrapper"):
+            try:
+                self.gesture.bus_wrapper.close()
+            except Exception:
+                pass
 
         # Close I2C buses for sensors
         for sensor in self.sensors:

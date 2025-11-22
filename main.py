@@ -15,7 +15,6 @@ from .hw.gpio import gpio_manager
 from .hw.stepper import StepperDrive
 from .hw.vacuum import Vacuum
 from .hw.buzzer import Buzzer
-from .hw.gesture import GestureSensor
 from .hw.i2c import I2CBus
 from .hw.apds9960 import APDS9960
 from .hw.mpu6050 import MPU6050
@@ -61,13 +60,14 @@ class Deskinator:
 
         self.gesture = None
         try:
-            self.gesture = GestureSensor(I2C.GESTURE_BUS, I2C.GESTURE_ADDR)
+            gesture_i2c = I2CBus(I2C.GESTURE_BUS)
+            self.gesture = APDS9960(gesture_i2c, I2C.GESTURE_ADDR)
+            self.gesture.init()
             if getattr(self.gesture, "sim_mode", False):
                 print("  Gesture sensor in simulation mode")
             else:
                 print(
-                    "  Gesture sensor ready on bus "
-                    f"{I2C.GESTURE_BUS} @ 0x{I2C.GESTURE_ADDR:02x}"
+                    f"  Gesture APDS9960 on bus {I2C.GESTURE_BUS} @ 0x{I2C.GESTURE_ADDR:02x}"
                 )
         except Exception as e:
             print(f"[Init] Warning: Gesture sensor unavailable ({e})")
@@ -235,19 +235,18 @@ class Deskinator:
         print("[Start] Hold your hand near the gesture sensor to begin...")
 
         try:
-            triggered = self.gesture.wait_for_hand_presence(timeout=None)
+            while True:
+                raw_val = self.gesture.read_proximity_raw()
+                if raw_val > ALG.GESTURE_RAW_THRESH:
+                    print(f"[Start] Proximity trigger detected (raw={raw_val})")
+                    self.start_signal = True
+                    self._notify_start_beep()
+                    return True
+                
+                time.sleep(0.1)
         except KeyboardInterrupt:
             print("\n[Start] Gesture wait cancelled by user")
             return False
-
-        if triggered:
-            print("[Start] Proximity trigger detected")
-            self.start_signal = True
-            self._notify_start_beep()
-            return True
-
-        print("[Start] Gesture sensor did not trigger")
-        return False
 
     async def loop_sense(self):
         """Sensing loop @ 50 Hz."""
@@ -276,7 +275,7 @@ class Deskinator:
                 else:
                     sensor_readings.append(255)  # Default to "on table" if sensor unavailable (high value)
 
-            # Check for edge events (raw value threshold: < 15)
+            # Check for edge events
             self._check_edge_events(sensor_readings)
 
             # Store sensor context
@@ -295,8 +294,8 @@ class Deskinator:
         if not sensors:
             return
 
-        # Edge threshold: trigger when raw value goes below 15
-        EDGE_RAW_THRESHOLD = 15
+        # Edge threshold from config
+        EDGE_RAW_THRESHOLD = ALG.EDGE_RAW_THRESH
 
         # Single sensor per side now
         left_raw = sensors[I2C.LEFT_SENSOR_IDX] if I2C.LEFT_SENSOR_IDX < len(sensors) else 255
@@ -623,8 +622,13 @@ class Deskinator:
         # Cleanup peripherals
         if self.buzzer:
             self.buzzer.cleanup()
-        if self.gesture:
-            self.gesture.cleanup()
+        
+        # Close gesture sensor bus if wrapper exists
+        if self.gesture and hasattr(self.gesture, 'bus_wrapper'):
+            try:
+                self.gesture.bus_wrapper.close()
+            except:
+                pass
 
         # Cleanup GPIO
         gpio_manager.cleanup()
