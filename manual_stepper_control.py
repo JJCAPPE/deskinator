@@ -1,376 +1,349 @@
 #!/usr/bin/env python3
-"""Interactive keyboard drive utility for A4988 stepper motor drivers.
-
-This script provides manual control of the robot using keyboard input.
-Use the WASD keys (plus Q/E/Z/C) to jog the robot and SPACE to stop.
-Press X or CTRL+C to exit.
-
-The robot uses A4988 stepper drivers controlled via GPIO pins with
-microstepping for smooth motion.
-
-Example usage:
-
-    python3 manual_stepper_control.py --speed 0.10 --max-speed 0.18
-
 """
+Visual Control Center for Deskinator.
 
-from __future__ import annotations
+Combines manual stepper control with live sensor visualization.
+Provides a GUI for driving the robot while monitoring proximity sensors
+and IMU data to prevent driving off the table.
+"""
 
 import argparse
 import sys
-import termios
 import time
-import tty
-from select import select
 from typing import Optional
 
+# Attempt to import Qt (prefer PyQt5 to match proximity_viewer, but handle both)
 try:
-    from hw.stepper import StepperDrive
-    from hw.apds9960 import APDS9960
-    from hw.i2c import I2CBus
-    from config import GEOM, LIMS, I2C
-except ImportError as exc:
-    raise SystemExit(
-        "Failed to import required modules. Make sure you're running from "
-        "the project root directory."
-    ) from exc
+    from PyQt5 import QtCore, QtWidgets, QtGui
+
+    QT_BACKEND = "PyQt5"
+except ImportError:
+    from PySide6 import QtCore, QtWidgets, QtGui
+
+    QT_BACKEND = "PySide6"
+
+from config import LIMS, I2C
+from hw.stepper import StepperDrive
+from proximity_viewer import ProximityRig, ProximityViewer, _exec_app
 
 
-class RawTerminal:
-    """Context manager to put the terminal into raw, non-blocking mode."""
-
-    def __init__(self, stream):
-        self._stream = stream
-        self._fd = stream.fileno()
-        self._old_attrs: Optional[list[int]] = None
-
-    def __enter__(self):
-        self._old_attrs = termios.tcgetattr(self._fd)
-        tty.setcbreak(self._fd)
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        if self._old_attrs is not None:
-            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_attrs)
-
-
-class KeyboardStepper:
-    """Minimal keyboard-based jog controller using velocity commands."""
-
-    PROMPT = """
-Controls:
-  w : both wheels forward
-  s : both wheels backward
-  a : pivot left (left back, right forward)
-  d : pivot right (left forward, right back)
-  space : stop (zero velocity)
-  x : exit
-
-Speed tweaks:
-  + / = : increase speed
-  - / _ : decrease speed
-  ? / h : show this help
-
-Press keys repeatedly or hold them; the last pressed command continues
-until another command is given or STOP (space) is pressed.
-"""
-
-    COMMANDS = {
-        "w": (+1, 0),  # Forward (v > 0, omega = 0)
-        "s": (-1, 0),  # Backward (v < 0, omega = 0)
-        "a": (0, +1),  # Pivot left (v = 0, omega > 0)
-        "d": (0, -1),  # Pivot right (v = 0, omega < 0)
-    }
+class RobotControlCenter(ProximityViewer):
+    """
+    GUI Control Center combining sensor viewer and manual drive control.
+    """
 
     def __init__(
         self,
+        rig: ProximityRig,
         stepper: StepperDrive,
-        *,
         base_speed: float,
-        speed_step: float,
         max_speed: float,
-    ):
-        self._stepper = stepper
+        speed_step: float,
+        interval_s: float = 0.1,
+    ) -> None:
+        super().__init__(rig, interval_s)
+        self.stepper = stepper
+        self.setWindowTitle("Deskinator Control Center")
+
+        # Control Parameters
         self._base_speed = base_speed
-        self._speed_step = speed_step
         self._max_speed = max_speed
+        self._speed_step = speed_step
         self._min_speed = 0.01
+        self._speed = max(self._min_speed, min(self._max_speed, base_speed))
 
-        # Angular speed for pivoting (fixed, independent of linear speed)
-        self._omega_speed = LIMS.OMEGA_MAX * 0.5  # Use 50% of max for pivoting
-
-        # Current command multipliers (-1, 0, or +1 for v and omega)
+        # Motion State
         self._v_mult = 0
         self._omega_mult = 0
+        self._omega_speed = LIMS.OMEGA_MAX * 0.5
 
-        # Track previous mode to detect mode transitions
-        self._prev_v_mult = 0
-        self._prev_omega_mult = 0
+        # Safety State
+        self._edge_detected = False
+        self._safety_override = False
 
-        # Current speed setting (0 to max_speed)
-        self._speed = self._clip_speed(base_speed)
+        # Enhance UI
+        self._init_control_ui()
 
-        # Initialize safety sensors
-        self._sensors = []
-        self._init_sensors()
-        self._safety_triggered = False
+        # Stepper Control Loop Timer (50 Hz)
+        self.control_timer = QtCore.QTimer(self)
+        self.control_timer.timeout.connect(self._update_control_loop)
+        self.control_timer.start(20)  # 20ms = 50Hz
 
-    def _init_sensors(self):
-        """Initialize front proximity sensors."""
-        # Left
-        try:
-            bus = I2CBus(I2C.LEFT_SENSOR_BUS)
-            s = APDS9960(bus, I2C.APDS_ADDR)
-            s.init()
-            self._sensors.append(s)
-            print(f"Left sensor initialized on bus {I2C.LEFT_SENSOR_BUS}")
-        except Exception as e:
-            print(f"Warning: Left sensor init failed: {e}")
+    def _init_control_ui(self):
+        """Insert drive control widgets into the existing layout."""
+        layout = self.centralWidget().layout()
 
-        # Right
-        try:
-            bus = I2CBus(I2C.RIGHT_SENSOR_BUS)
-            s = APDS9960(bus, I2C.APDS_ADDR)
-            s.init()
-            self._sensors.append(s)
-            print(f"Right sensor initialized on bus {I2C.RIGHT_SENSOR_BUS}")
-        except Exception as e:
-            print(f"Warning: Right sensor init failed: {e}")
+        # Container for control status
+        self.control_frame = QtWidgets.QFrame()
+        self.control_frame.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        self.control_frame.setStyleSheet(
+            "QFrame { background-color: #2b2b2b; border-radius: 5px; }"
+        )
 
-    def _check_safety(self) -> bool:
-        """Check if safe to move forward. Returns False if off table."""
-        if not self._sensors:
-            return True  # No sensors, assume safe
+        h_layout = QtWidgets.QHBoxLayout(self.control_frame)
+        h_layout.setContentsMargins(10, 10, 10, 10)
 
-        limit = 30
-        unsafe = False
+        # Direction Indicator / Status
+        self.dir_label = QtWidgets.QLabel("STOP")
+        self.dir_label.setFont(QtGui.QFont("Arial", 24, QtGui.QFont.Bold))
+        self.dir_label.setStyleSheet("color: #eeeeee;")
+        self.dir_label.setAlignment(QtCore.Qt.AlignCenter)
+        h_layout.addWidget(self.dir_label, stretch=2)
 
-        # Check all initialized sensors
-        for s in self._sensors:
-            try:
-                val = s.read_proximity_raw()
-                if val < limit:
-                    unsafe = True
-            except Exception:
-                pass
+        # Speed Indicator
+        self.speed_label = QtWidgets.QLabel(f"{self._speed:.2f} m/s")
+        self.speed_label.setFont(QtGui.QFont("Monospace", 18))
+        self.speed_label.setStyleSheet("color: #00ccff;")
+        self.speed_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        h_layout.addWidget(self.speed_label, stretch=1)
 
-        return not unsafe
+        # Safety Indicator
+        self.safety_label = QtWidgets.QLabel("SAFE")
+        self.safety_label.setFont(QtGui.QFont("Arial", 14, QtGui.QFont.Bold))
+        self.safety_label.setStyleSheet(
+            "color: #00ff00; background-color: #1a441a; padding: 5px;"
+        )
+        self.safety_label.setAlignment(QtCore.Qt.AlignCenter)
+        h_layout.addWidget(self.safety_label, stretch=1)
 
-    def run(self):
-        """Main interactive loop."""
+        # Insert at the top of the main VBoxLayout
+        layout.insertWidget(0, self.control_frame)
 
-        self._print_banner()
+        # Add help text at the bottom
+        help_text = (
+            "Controls: WASD (Move) | Q/E/Z/C (Turn) | SPACE (Stop)\n"
+            "+/- (Speed) | Safety: Stops FWD if sensor < 30"
+        )
+        self.help_label = QtWidgets.QLabel(help_text)
+        self.help_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.help_label.setStyleSheet("color: #888888;")
+        layout.addWidget(self.help_label)
 
-        # Control loop runs at ~50 Hz for smooth motion
-        dt = 0.02
-        next_update = time.monotonic()
+    def keyPressEvent(self, event: QtGui.QKeyEvent):
+        key = event.key()
+        text = event.text().lower()
 
-        try:
-            with RawTerminal(sys.stdin):
-                while True:
-                    # Check for periodic updates
-                    now = time.monotonic()
-                    if now >= next_update:
-                        # Safety check: if moving forward and edge detected, stop
-                        if self._v_mult > 0:
-                            if not self._check_safety():
-                                self._set_command(0, 0)
-                                print("\nSafety Stop! Edge detected.")
+        # Speed control
+        if text in {"+", "="}:
+            self._adjust_speed(self._speed_step)
+            return
+        if text in {"-", "_"}:
+            self._adjust_speed(-self._speed_step)
+            return
 
-                        self._update_stepper()
-                        next_update = now + dt
+        # Motion commands
+        # Map keys to (v_mult, omega_mult)
+        cmd = None
+        if key == QtCore.Qt.Key_W:
+            cmd = (1, 0)
+        elif key == QtCore.Qt.Key_S:
+            cmd = (-1, 0)
+        elif key == QtCore.Qt.Key_A:
+            cmd = (0, 1)
+        elif key == QtCore.Qt.Key_D:
+            cmd = (0, -1)
+        elif key == QtCore.Qt.Key_Q:
+            cmd = (1, -1)
+        elif key == QtCore.Qt.Key_E:
+            cmd = (1, 1)
+        elif key == QtCore.Qt.Key_Z:
+            cmd = (-1, 1)
+        elif key == QtCore.Qt.Key_C:
+            cmd = (-1, -1)
+        elif key == QtCore.Qt.Key_Space:
+            cmd = (0, 0)
 
-                    timeout = max(0.0, next_update - time.monotonic())
-                    key = self._read_key(timeout)
+        if cmd is not None:
+            v_req, omega_req = cmd
 
-                    if key:
-                        key = key.lower()
-                        if key == "x":
-                            print("\nExiting...")
-                            break
-                        if key == " ":
-                            self._set_command(0, 0)
-                            continue
-                        if key in {"+", "="}:
-                            self._adjust_speed(self._speed_step)
-                            continue
-                        if key in {"-", "_"}:
-                            self._adjust_speed(-self._speed_step)
-                            continue
-                        if key in {"?", "h"}:
-                            self._show_help()
-                            continue
-                        cmd = self.COMMANDS.get(key)
-                        if cmd:
-                            # If command is forward, check safety first
-                            v_req, _ = cmd
-                            if v_req > 0:
-                                if not self._check_safety():
-                                    print("\nCannot move forward: Edge detected.")
-                                    continue
+            # Pre-check safety for new command
+            if v_req > 0 and self._edge_detected:
+                # Flash warning, refuse to set forward command
+                self.safety_label.setStyleSheet(
+                    "color: white; background-color: red; padding: 5px;"
+                )
+                return
 
-                            self._set_command(*cmd)
-                        else:
-                            print(f"\nUnmapped key: {repr(key)}")
+            self._set_command(v_req, omega_req)
 
-        except KeyboardInterrupt:
-            print("\nInterrupted by user")
-        finally:
-            self._stepper.stop()
-            self._stepper.stop_pulse_generation()
-
-    def _read_key(self, timeout: float) -> Optional[str]:
-        rlist, _, _ = select([sys.stdin], [], [], timeout)
-        if rlist:
-            return sys.stdin.read(1)
-        return None
-
-    def _set_command(self, v_mult: int, omega_mult: int):
-        """Set velocity command multipliers."""
-        v_mult = int(v_mult)
-        omega_mult = int(omega_mult)
-
-        # Detect mode transitions: switching between pure forward/backward and pure pivot
-        # Mode types: 0=stop, 1=pure linear (v != 0, omega == 0), 2=pure pivot (v == 0, omega != 0), 3=combined
-        prev_mode = self._get_mode_type(self._prev_v_mult, self._prev_omega_mult)
-        new_mode = self._get_mode_type(v_mult, omega_mult)
-
-        # If transitioning between pure linear and pure pivot, reset velocities for clean transition
-        if prev_mode in (1, 2) and new_mode in (1, 2) and prev_mode != new_mode:
-            # Reset stepper velocities to allow immediate mode transition
-            with self._stepper.lock:
-                self._stepper.vL_current = 0.0
-                self._stepper.vR_current = 0.0
-
-        self._prev_v_mult = self._v_mult
-        self._prev_omega_mult = self._omega_mult
+    def _set_command(self, v_mult, omega_mult):
+        # Update state
         self._v_mult = v_mult
         self._omega_mult = omega_mult
 
-        print(
-            f"\rV: {self._dir_label(self._v_mult)} | "
-            f"Omega: {self._dir_label(self._omega_mult)} | "
-            f"Speed: {self._speed:.3f} m/s",
-            end="",
-            flush=True,
-        )
-
-    def _get_mode_type(self, v_mult: int, omega_mult: int) -> int:
-        """Classify motion mode: 0=stop, 1=pure linear, 2=pure pivot, 3=combined."""
+        # Update UI Text
         if v_mult == 0 and omega_mult == 0:
-            return 0  # stop
-        elif v_mult != 0 and omega_mult == 0:
-            return 1  # pure linear (forward/backward)
-        elif v_mult == 0 and omega_mult != 0:
-            return 2  # pure pivot
-        else:
-            return 3  # combined motion
+            text = "STOP"
+        elif v_mult > 0:
+            text = (
+                "FORWARD"
+                if omega_mult == 0
+                else ("FWD RIGHT" if omega_mult < 0 else "FWD LEFT")
+            )
+        elif v_mult < 0:
+            text = (
+                "BACKWARD"
+                if omega_mult == 0
+                else ("BACK RIGHT" if omega_mult < 0 else "BACK LEFT")
+            )
+        else:  # v=0
+            text = "PIVOT RIGHT" if omega_mult < 0 else "PIVOT LEFT"
 
-    def _dir_label(self, multiplier: int) -> str:
-        if multiplier > 0:
-            return "forward"
-        if multiplier < 0:
-            return "backward"
-        return "stop"
+        self.dir_label.setText(text)
 
     def _adjust_speed(self, delta: float):
-        """Adjust base speed setting."""
-        if delta == 0.0:
-            return
-        new_speed = self._clip_speed(self._speed + delta)
-        if abs(new_speed - self._speed) < 1e-6:
-            print(f"\nSpeed already at limit ({self._speed:.3f} m/s).")
-            return
+        new_speed = max(self._min_speed, min(self._max_speed, self._speed + delta))
         self._speed = new_speed
-        print(f"\nSpeed -> {self._speed:.3f} m/s (max: {self._max_speed:.3f} m/s)")
+        self.speed_label.setText(f"{self._speed:.2f} m/s")
 
-    def _clip_speed(self, speed: float) -> float:
-        """Clip speed to valid range."""
-        return max(self._min_speed, min(self._max_speed, speed))
+    def _update_control_loop(self):
+        """Runs at 50Hz to update stepper and check safety."""
 
-    def _update_stepper(self):
-        """Update stepper drive with current velocity command."""
-        # Calculate commanded velocities
+        # Check safety using cached readings from ProximityViewer (updated at ~10Hz)
+        self._check_safety()
+
+        # Enforce safety on current command
+        if self._v_mult > 0 and self._edge_detected:
+            # Emergency Stop for forward motion
+            self._v_mult = 0
+            self._omega_mult = 0
+            self.dir_label.setText("SAFETY STOP")
+            self.dir_label.setStyleSheet("color: red;")
+        elif not self._edge_detected:
+            self.dir_label.setStyleSheet("color: #eeeeee;")
+
+        # Compute commands
         v_cmd = self._v_mult * self._speed
-        # Use fixed angular speed for pivoting (independent of linear speed)
         omega_cmd = self._omega_mult * self._omega_speed
 
-        # Send command to stepper
-        self._stepper.command(v_cmd, omega_cmd)
+        # Send to stepper
+        self.stepper.command(v_cmd, omega_cmd)
+        self.stepper.update(0.02)
 
-        # Update internal state (needed for acceleration ramping)
-        self._stepper.update(0.02)
+    def _check_safety(self):
+        """Analyze latest sensor data for edges."""
+        # self.last_raw_readings is maintained by ProximityViewer.update_plot()
+        if self.last_raw_readings is None:
+            return
 
-    def _show_help(self):
-        print("\n" + self.PROMPT + "\n")
+        limit = 30
+        is_unsafe = False
 
-    def _print_banner(self):
-        print("=" * 60)
-        print("  A4988 Stepper Driver keyboard controller")
-        print(f"  Step style: {self._stepper.step_style_name}")
-        print(
-            f"  Base speed: {self._speed:.3f} m/s "
-            f"(limits {self._min_speed:.3f}-{self._max_speed:.3f})"
-        )
-        print(f"  Max linear velocity: {LIMS.V_MAX:.3f} m/s")
-        print(f"  Max angular velocity: {LIMS.OMEGA_MAX:.3f} rad/s")
-        print("  Press X or CTRL+C to exit.")
-        print("=" * 60)
-        print(self.PROMPT)
+        # ProximityRig.read() returns [Left, Right, Gesture] (if active)
+        # Check Left (Index 0)
+        if len(self.last_raw_readings) > 0:
+            val = self.last_raw_readings[0]
+            # val is None if sensor disabled/error
+            if val is not None and val < limit:
+                is_unsafe = True
+
+        # Check Right (Index 1)
+        if len(self.last_raw_readings) > 1:
+            val = self.last_raw_readings[1]
+            if val is not None and val < limit:
+                is_unsafe = True
+
+        self._edge_detected = is_unsafe
+
+        if is_unsafe:
+            self.safety_label.setText("EDGE DETECTED")
+            self.safety_label.setStyleSheet(
+                "color: white; background-color: red; padding: 5px;"
+            )
+        else:
+            self.safety_label.setText("SAFE")
+            self.safety_label.setStyleSheet(
+                "color: #00ff00; background-color: #1a441a; padding: 5px;"
+            )
+
+    def closeEvent(self, event):
+        """Stop motors when window is closed."""
+        self.stepper.stop()
+        self.stepper.stop_pulse_generation()
+        event.accept()
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Deskinator Control Center")
+
+    # Drive Args
+    parser.add_argument("--speed", type=float, default=0.10, help="Base speed m/s")
     parser.add_argument(
-        "--speed",
-        type=float,
-        default=0.10,
-        help="Initial linear speed in m/s (default: 0.10).",
+        "--max-speed", type=float, default=LIMS.V_MAX, help="Max speed m/s"
     )
     parser.add_argument(
-        "--max-speed",
-        type=float,
-        default=None,
-        help=f"Maximum linear speed in m/s (default: {LIMS.V_MAX:.3f} from config).",
+        "--speed-step", type=float, default=0.02, help="Speed increment"
     )
     parser.add_argument(
-        "--speed-step",
-        type=float,
-        default=0.02,
-        help="Speed increment/decrement for +/- keys in m/s (default: 0.02).",
+        "--hold", action="store_true", help="Keep motors enabled on exit"
+    )
+
+    # Sensor Args (Mirroring proximity_viewer defaults)
+    parser.add_argument(
+        "--active-sensors", default="RLGI", help="Sensors to enable (RLGI)"
+    )
+    parser.add_argument("--left-bus", type=int, default=I2C.LEFT_SENSOR_BUS)
+    parser.add_argument("--right-bus", type=int, default=I2C.RIGHT_SENSOR_BUS)
+    parser.add_argument("--sensor-addr", type=int, default=I2C.APDS_ADDR)
+    parser.add_argument("--gesture-bus", type=int, default=I2C.GESTURE_BUS)
+    parser.add_argument("--gesture-addr", type=int, default=I2C.GESTURE_ADDR)
+    parser.add_argument(
+        "--imu-addr",
+        type=lambda x: int(x, 0) if x != "none" else None,
+        default=I2C.ADDR_IMU,
     )
     parser.add_argument(
-        "--hold",
-        action="store_true",
-        help="Keep drivers enabled on exit (default disables).",
+        "--interval", type=float, default=0.1, help="Sensor update interval"
     )
+
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
 
-    max_speed = args.max_speed if args.max_speed is not None else LIMS.V_MAX
-    max_speed = max(0.01, min(max_speed, LIMS.V_MAX))
-    speed_step = max(0.01, args.speed_step)
-    base_speed = max(0.01, min(max_speed, args.speed))
+    # 1. Initialize Sensors
+    print("Initializing sensors...")
+    active_flags = args.active_sensors.replace("-", "").upper()
+    rig = ProximityRig(
+        left_bus=args.left_bus,
+        right_bus=args.right_bus,
+        sensor_address=args.sensor_addr,
+        gesture_bus=args.gesture_bus,
+        gesture_address=args.gesture_addr,
+        imu_address=args.imu_addr,
+        imu_bus=I2C.IMU_BUS,
+        active_sensors=active_flags,
+    )
 
-    # Initialize stepper drive
+    # 2. Initialize Stepper
+    print("Initializing stepper drive...")
     stepper = StepperDrive(release_on_idle=not args.hold)
 
+    # 3. Start GUI
+    app = QtWidgets.QApplication(sys.argv)
+    app.setStyle("Fusion")  # Dark mode friendly usually
+
+    # Close rig on exit
+    app.aboutToQuit.connect(rig.close)
+
+    viewer = RobotControlCenter(
+        rig=rig,
+        stepper=stepper,
+        base_speed=args.speed,
+        max_speed=args.max_speed,
+        speed_step=args.speed_step,
+        interval_s=args.interval,
+    )
+    viewer.show()
+
     try:
-        controller = KeyboardStepper(
-            stepper,
-            base_speed=base_speed,
-            speed_step=speed_step,
-            max_speed=max_speed,
-        )
-        controller.run()
+        return _exec_app(app)
     finally:
-        # Ensure cleanup
+        print("Cleaning up...")
         stepper.stop()
         stepper.stop_pulse_generation()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

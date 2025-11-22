@@ -355,10 +355,14 @@ class ProximityViewer(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self.update_plot)
         self.timer.start(int(self.interval_s * 1000))
 
+        self.last_readings = None
+        self.last_raw_readings = None
         self.update_plot()
 
     def update_plot(self) -> None:
         readings, raw_readings = self.rig.read()
+        self.last_readings = readings
+        self.last_raw_readings = raw_readings
 
         heights: List[float] = []
         parts = []
