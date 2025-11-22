@@ -7,7 +7,9 @@ simple enough to run directly on the robot.
 
 Usage examples::
 
-    python3 proximity_viewer.py
+    python3 proximity_viewer.py --RLGI  # All sensors
+    python3 proximity_viewer.py --RL    # Just front sensors (Right, Left)
+    python3 proximity_viewer.py --I     # Just IMU
     python3 proximity_viewer.py --interval 0.2
 """
 
@@ -66,79 +68,94 @@ class ProximityRig:
         gesture_address: int,
         imu_address: Optional[int] = None,
         imu_bus: Optional[int] = None,
+        active_sensors: str = "RLGI",
     ) -> None:
         self.channel_names = ["left", "right"]
+        self.active_sensors = active_sensors.upper()
 
-        self.sensors: List[Optional[APDS9960]] = []
+        self.sensors: List[Optional[APDS9960]] = [None, None]  # [Left, Right]
 
         # Left sensor
-        try:
-            left_i2c = I2CBus(left_bus)
-            print(
-                f"Initializing LEFT sensor on bus {left_bus} (I2CBus bus_number={left_i2c.bus_number})"
-            )
-            left_sensor = APDS9960(left_i2c, sensor_address)
-            left_sensor.init()
-            time.sleep(0.010)
-            self.sensors.append(left_sensor)
-            print(f"  LEFT sensor initialized successfully")
-        except Exception as exc:
-            print(
-                f"Warning: failed to init left proximity sensor on bus {left_bus}: {exc}"
-            )
-            self.sensors.append(None)
+        if "L" in self.active_sensors:
+            try:
+                left_i2c = I2CBus(left_bus)
+                print(
+                    f"Initializing LEFT sensor on bus {left_bus} (I2CBus bus_number={left_i2c.bus_number})"
+                )
+                left_sensor = APDS9960(left_i2c, sensor_address)
+                left_sensor.init()
+                time.sleep(0.010)
+                self.sensors[0] = left_sensor
+                print(f"  LEFT sensor initialized successfully")
+            except Exception as exc:
+                print(
+                    f"Warning: failed to init left proximity sensor on bus {left_bus}: {exc}"
+                )
+        else:
+            print("Skipping LEFT sensor (flag L not set)")
 
         # Right sensor
-        try:
-            right_i2c = I2CBus(right_bus)
-            print(
-                f"Initializing RIGHT sensor on bus {right_bus} (I2CBus bus_number={right_i2c.bus_number})"
-            )
-            right_sensor = APDS9960(right_i2c, sensor_address)
-            right_sensor.init()
-            time.sleep(0.010)
-            self.sensors.append(right_sensor)
-            print(f"  RIGHT sensor initialized successfully")
-        except Exception as exc:
-            print(
-                f"Warning: failed to init right proximity sensor on bus {right_bus}: {exc}"
-            )
-            self.sensors.append(None)
+        if "R" in self.active_sensors:
+            try:
+                right_i2c = I2CBus(right_bus)
+                print(
+                    f"Initializing RIGHT sensor on bus {right_bus} (I2CBus bus_number={right_i2c.bus_number})"
+                )
+                right_sensor = APDS9960(right_i2c, sensor_address)
+                right_sensor.init()
+                time.sleep(0.010)
+                self.sensors[1] = right_sensor
+                print(f"  RIGHT sensor initialized successfully")
+            except Exception as exc:
+                print(
+                    f"Warning: failed to init right proximity sensor on bus {right_bus}: {exc}"
+                )
+        else:
+            print("Skipping RIGHT sensor (flag R not set)")
 
-        if right_bus == gesture_bus:
+        if (
+            right_bus == gesture_bus
+            and "R" in self.active_sensors
+            and "G" in self.active_sensors
+        ):
             print(
                 f"Warning: Right sensor and Gesture sensor share bus {right_bus}. "
                 "They may conflict if they have the same address!"
             )
 
-        gesture: Optional[GestureSensor]
-        try:
-            print(f"Initializing GESTURE sensor on bus {gesture_bus}")
-            gesture = GestureSensor(bus_number=gesture_bus, address=gesture_address)
-            print(
-                f"  GESTURE sensor initialized successfully (bus_number={gesture.bus_number})"
-            )
-        except Exception as exc:
-            print(f"Warning: failed to init gesture sensor: {exc}")
-            gesture = None
-        self.gesture = gesture
+        self.gesture: Optional[GestureSensor] = None
+        if "G" in self.active_sensors:
+            try:
+                print(f"Initializing GESTURE sensor on bus {gesture_bus}")
+                gesture = GestureSensor(bus_number=gesture_bus, address=gesture_address)
+                print(
+                    f"  GESTURE sensor initialized successfully (bus_number={gesture.bus_number})"
+                )
+                self.gesture = gesture
+            except Exception as exc:
+                print(f"Warning: failed to init gesture sensor: {exc}")
+        else:
+            print("Skipping GESTURE sensor (flag G not set)")
 
         self._imu_warning_printed = False
-        if imu_address is None:
-            self.imu: Optional[MPU6050] = None
-        else:
+        self.imu: Optional[MPU6050] = None
+
+        if "I" in self.active_sensors and imu_address is not None:
             try:
                 # Use separate bus for IMU if provided, otherwise fallback to default bus 1
                 bus_num = imu_bus if imu_bus is not None else 1
                 imu_bus_instance = I2CBus(bus_num)
                 self.imu = MPU6050(imu_bus_instance, imu_address)
+                if getattr(self.imu, "sim_mode", False):
+                    print("Info: IMU running in simulation mode")
+                else:
+                    print(f"  IMU initialized successfully on bus {bus_num}")
             except Exception as exc:
                 print(
                     f"Warning: failed to init IMU at address 0x{imu_address:02x}: {exc}"
                 )
-                self.imu = None
-        if self.imu is not None and getattr(self.imu, "sim_mode", False):
-            print("Info: IMU running in simulation mode")
+        else:
+            print("Skipping IMU (flag I not set or no address)")
 
     def read(self) -> tuple[List[Optional[float]], List[Optional[int]]]:
         """Read normalized proximity values and raw values for all sensors.
@@ -151,7 +168,7 @@ class ProximityRig:
         raw_values: List[Optional[int]] = []
 
         # Read left sensor (bus 7 - software I2C)
-        if len(self.sensors) > 0 and self.sensors[0] is not None:
+        if self.sensors[0] is not None:
             try:
                 raw = self.sensors[0].read_proximity_raw()
                 time.sleep(0.010)  # Delay for bus timing
@@ -166,11 +183,12 @@ class ProximityRig:
             values.append(None)
             raw_values.append(None)
 
-        # Small delay when switching between buses (left=bus 7, right=bus 1)
-        time.sleep(0.010)
+        # Small delay when switching between buses if both active
+        if self.sensors[0] is not None and self.sensors[1] is not None:
+            time.sleep(0.010)
 
         # Read right sensor (bus 1 - hardware I2C)
-        if len(self.sensors) > 1 and self.sensors[1] is not None:
+        if self.sensors[1] is not None:
             try:
                 raw = self.sensors[1].read_proximity_raw()
                 time.sleep(0.010)  # Delay for bus timing
@@ -185,8 +203,11 @@ class ProximityRig:
             values.append(None)
             raw_values.append(None)
 
-        # Small delay when switching to gesture bus (bus 3 - software I2C)
-        time.sleep(0.010)
+        # Small delay when switching to gesture bus
+        if (
+            self.sensors[0] is not None or self.sensors[1] is not None
+        ) and self.gesture is not None:
+            time.sleep(0.010)
 
         # Read gesture sensor (bus 3 - software I2C)
         if self.gesture is not None:
@@ -346,7 +367,17 @@ class ProximityViewer(QtWidgets.QMainWindow):
                 isinstance(raw_value, float) and not math.isfinite(raw_value)
             ):
                 heights.append(0.0)
-                parts.append(f"{label}=-- (raw:--)")
+                # Show -- if active but failed, or Disabled if disabled via flags
+                is_active = False
+                if label == "left" and "L" in self.rig.active_sensors:
+                    is_active = True
+                elif label == "right" and "R" in self.rig.active_sensors:
+                    is_active = True
+                elif label == "start_gesture" and "G" in self.rig.active_sensors:
+                    is_active = True
+
+                status_str = "ERR" if is_active else "OFF"
+                parts.append(f"{label}={status_str}")
             else:
                 clamped = max(0.0, min(1.0, float(raw_value) / 255.0))
                 heights.append(clamped)
@@ -360,7 +391,7 @@ class ProximityViewer(QtWidgets.QMainWindow):
     def update_imu_display(self) -> None:
         self.has_imu = self.rig.imu is not None
         if not self.has_imu:
-            self.imu_label.setText("IMU not configured")
+            self.imu_label.setText("IMU not configured (or disabled)")
             self.imu_vector.setData([0.0, 0.0], [0.0, 0.0])
             return
 
@@ -386,6 +417,12 @@ class ProximityViewer(QtWidgets.QMainWindow):
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Live proximity sensor viewer")
+    parser.add_argument(
+        "active_sensors",
+        nargs="?",
+        default="RLGI",
+        help="Sensors to enable (RLGI): R=Right, L=Left, G=Gesture, I=IMU. Default: RLGI",
+    )
     parser.add_argument(
         "--interval",
         type=float,
@@ -433,11 +470,24 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=I2C.ADDR_IMU,
         help="IMU I2C address (default from config; 'none' to disable)",
     )
-    return parser.parse_args(argv)
+
+    # Handle the positional arg if it looks like a flag or isn't provided
+    # This is a bit of a hack to allow flags without a value if the user provides "RLG"
+    args, unknown = parser.parse_known_args(argv)
+
+    # If active_sensors starts with '-', it might have been parsed as a flag if we defined it differently.
+    # But here we made it a positional arg.
+    # If the user typed `python script.py --interval 0.1`, `active_sensors` takes "RLGI" (default)
+    # If the user typed `python script.py RL`, `active_sensors` takes "RL"
+
+    return args
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+
+    # Clean up the active_sensors string (remove dashes if user provided them like -RLGI)
+    active_flags = args.active_sensors.replace("-", "")
 
     # Optional one-shot calibration path
     if args.calibrate:
@@ -449,6 +499,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             gesture_address=args.gesture_addr,
             imu_address=args.imu_addr,
             imu_bus=I2C.IMU_BUS,
+            active_sensors=active_flags,
         )
         print(
             "\nStarting APDS calibration (place over table, then off edge when prompted)..."
@@ -456,7 +507,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sensor_names = ["left", "right"]
         for name, sensor in zip(sensor_names, rig.sensors):
             if sensor is None:
-                print(f"- {name.capitalize()} sensor: not present, skipping")
+                print(
+                    f"- {name.capitalize()} sensor: not present (or disabled), skipping"
+                )
                 continue
             try:
                 print(f"\nCalibrating {name} sensor:")
@@ -475,6 +528,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         gesture_address=args.gesture_addr,
         imu_address=args.imu_addr,
         imu_bus=I2C.IMU_BUS,
+        active_sensors=active_flags,
     )
 
     app = QtWidgets.QApplication(sys.argv)
