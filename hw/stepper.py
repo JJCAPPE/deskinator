@@ -244,7 +244,7 @@ class StepperDrive:
             rate_L = abs(vL) * self.steps_per_m_effective
             if rate_L > 0.0:
                 period_L = max(1.0 / rate_L, self._MIN_STEP_PERIOD_S)
-                direction_L = 1 if vL >= 0 else 0
+                direction_L = 0 if vL >= 0 else 1
 
                 # Set direction pin
                 gpio_manager.output(PINS.LEFT_DIR, direction_L)
@@ -275,7 +275,7 @@ class StepperDrive:
             rate_R = abs(vR) * self.steps_per_m_effective
             if rate_R > 0.0:
                 period_R = max(1.0 / rate_R, self._MIN_STEP_PERIOD_S)
-                direction_R = 1 if vR >= 0 else 0
+                direction_R = 0 if vR >= 0 else 1
 
                 # Set direction pin
                 gpio_manager.output(PINS.RIGHT_DIR, direction_R)
