@@ -273,8 +273,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--speed",
         type=float,
-        default=0.10,
-        help="Initial linear speed in m/s (default: 0.10).",
+        default=0.20,
+        help="Initial linear speed in m/s (default: 0.20).",
     )
     parser.add_argument(
         "--max-speed",
