@@ -13,6 +13,7 @@ APDS9960_ENABLE = 0x80
 APDS9960_PDATA = 0x9C
 APDS9960_CONTROL = 0x8F
 APDS9960_PPULSE = 0x8E
+APDS9960_CONFIG2 = 0x90
 
 # Enable bits
 APDS9960_PON = 0x01  # Power on
@@ -56,24 +57,52 @@ class APDS9960:
             # Verify CONTROL register
             ctl = self.bus.read_byte_data(self.address, APDS9960_CONTROL)
             if ctl != 0x2C:
-                print(f"APDS9960 Warning: CONTROL register mismatch! Expected 0x2C, got 0x{ctl:02X}")
+                print(
+                    f"APDS9960 Warning: CONTROL register mismatch! Expected 0x2C, got 0x{ctl:02X}"
+                )
                 # Retry once
                 time.sleep(0.01)
                 self.bus.write_byte_data(self.address, APDS9960_CONTROL, 0x2C)
                 ctl = self.bus.read_byte_data(self.address, APDS9960_CONTROL)
                 if ctl != 0x2C:
-                    print(f"APDS9960 Error: CONTROL register failed to set! Got 0x{ctl:02X}")
+                    print(
+                        f"APDS9960 Error: CONTROL register failed to set! Got 0x{ctl:02X}"
+                    )
 
-            # Proximity pulse: 16 pulses, 16us length
-            self.bus.write_byte_data(self.address, APDS9960_PPULSE, 0x8F)
+            # Proximity pulse: 8 pulses, 32us length (matches gesture sensor)
+            # 0x80 (PPLEN=32us) | 0x07 (PPULSE=8) = 0x87
+            # Previous was 0x8F (16us, 16 pulses)
+            self.bus.write_byte_data(self.address, APDS9960_PPULSE, 0x87)
 
             # Verify PPULSE register
             pulse = self.bus.read_byte_data(self.address, APDS9960_PPULSE)
-            if pulse != 0x8F:
-                print(f"APDS9960 Warning: PPULSE register mismatch! Expected 0x8F, got 0x{pulse:02X}")
+            if pulse != 0x87:
+                print(
+                    f"APDS9960 Warning: PPULSE register mismatch! Expected 0x87, got 0x{pulse:02X}"
+                )
                 # Retry once
                 time.sleep(0.01)
-                self.bus.write_byte_data(self.address, APDS9960_PPULSE, 0x8F)
+                self.bus.write_byte_data(self.address, APDS9960_PPULSE, 0x87)
+
+            # LED Boost (CONFIG2) - increases IR LED power
+            # 0x41 = LED_BOOST 300% (bit 6 set? no 0x40 is LED_BOOST 300%)
+            # Wait, 0x90 register CONFIG2.
+            # Bit 5:4 LED_BOOST. 00=100%, 01=150%, 10=200%, 11=300%.
+            # 0x41 ??
+            # Register 0x90 (CONFIG2).
+            # Bits 5:4 are LED_BOOST.
+            # 00 = 100%, 01 = 150%, 10 = 200%, 11 = 300%.
+            # User suggested 0x41.
+            # 0x41 = 0100 0001.
+            # Bit 6 is 1. Bit 0 is 1.
+            # Reserved bits are 7, 3:2.
+            # Bit 6 is PSIEN (Proximity Saturation Interrupt Enable).
+            # Bit 0, 1 are reserved/CPSIEN?
+            # Let's check datasheet or trust user.
+            # User said: "self.bus.write_byte_data(self.address, 0x90, 0x41)  # if values still very low, try 0x49"
+            # 0x40 is LED_BOOST=100%?? No.
+            # Let's trust the user's value 0x41 for now as they requested it.
+            self.bus.write_byte_data(self.address, APDS9960_CONFIG2, 0x41)
 
             # Enable proximity detection
             enable = self.bus.read_byte_data(self.address, APDS9960_ENABLE)
