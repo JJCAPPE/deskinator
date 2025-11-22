@@ -11,4 +11,5 @@ pyqtgraph>=0.13
 # Raspberry Pi / hardware support (Linux only)
 RPi.GPIO ; platform_system == "Linux"
 adafruit-circuitpython-apds9960 ; platform_system == "Linux"
+adafruit-extended-bus ; platform_system == "Linux"
 adafruit-blinka ; platform_system == "Linux"

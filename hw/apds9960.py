@@ -1,117 +1,73 @@
 """
 APDS9960 proximity sensor driver.
 
-Minimal implementation using direct I2C register access.
+Implementation using adafruit-circuitpython-apds9960 and adafruit-extended-bus.
 """
 
 import time
 import numpy as np
 from .i2c import I2CBus
 
-# APDS9960 Registers
-APDS9960_ENABLE = 0x80
-APDS9960_PDATA = 0x9C
-APDS9960_CONTROL = 0x8F
-APDS9960_PPULSE = 0x8E
-APDS9960_GCONF1 = 0xA2
-APDS9960_GCONF2 = 0xA3
-APDS9960_GPULSE = 0xA6
-APDS9960_GCONF4 = 0xAB
+try:
+    from adafruit_extended_bus import ExtendedI2C as I2C
+    from adafruit_apds9960.apds9960 import APDS9960 as AdafruitAPDS9960
 
-# Enable bits
-APDS9960_PON = 0x01  # Power on
-APDS9960_PEN = 0x04  # Proximity enable
-APDS9960_GEN = 0x40  # Gesture enable
+    ADAFRUIT_AVAILABLE = True
+except ImportError:
+    ADAFRUIT_AVAILABLE = False
 
 
 class APDS9960:
-    """APDS9960 proximity sensor."""
+    """APDS9960 proximity sensor using Adafruit library."""
 
     def __init__(self, bus: I2CBus, address: int = 0x39):
         """
         Initialize APDS9960 sensor.
 
         Args:
-            bus: I2C bus instance
+            bus: I2C bus instance (wrapper from hw.i2c)
             address: I2C address (default 0x39)
         """
-        self.bus = bus
+        self.bus_wrapper = bus
+        self.bus_number = bus.bus_number
         self.address = address
         self.calibration_offset = 0.0
         self.calibration_scale = 1.0
-        self.sim_mode = bus.sim_mode
+        self.sim_mode = bus.sim_mode or (not ADAFRUIT_AVAILABLE)
+
+        self.i2c = None
+        self.sensor = None
 
     def init(self):
         """Initialize sensor for proximity detection."""
         if self.sim_mode:
-            print("APDS9960: Running in simulation mode")
+            print(
+                "APDS9960: Running in simulation mode (Adafruit lib missing or sim requested)"
+            )
             return
 
         try:
             print(
-                f"APDS9960.init: Using bus {self.bus.bus_number}, address 0x{self.address:02X}"
+                f"APDS9960.init: Using bus {self.bus_number}, address 0x{self.address:02X}"
             )
-            # Power on
-            self.bus.write_byte_data(self.address, APDS9960_ENABLE, APDS9960_PON)
-            time.sleep(0.05)
 
-            # Configure gesture engine (matched to gesture.py)
-            # GMODE = 1 (gesture mode)
-            self.bus.write_byte_data(self.address, APDS9960_GCONF4, 0x01)
+            # Initialize the Extended I2C bus
+            self.i2c = I2C(self.bus_number)
 
-            # Set gesture proximity entry threshold
-            self.bus.write_byte_data(self.address, APDS9960_GCONF1, 0x40)
+            # Initialize the sensor
+            self.sensor = AdafruitAPDS9960(self.i2c, address=self.address)
+            self.sensor.enable_proximity = True
 
-            # Set gesture exit persistence (4 gesture end)
-            self.bus.write_byte_data(self.address, APDS9960_GCONF2, 0x01)
-
-            # Set gesture LED drive strength and wait time
-            self.bus.write_byte_data(self.address, APDS9960_GPULSE, 0xC9)
-
-            # Configure proximity sensing for presence detection: PDRIVE = 100mA, PGAIN = 8x
-            self.bus.write_byte_data(self.address, APDS9960_CONTROL, 0x2C)
-
-            # Verify CONTROL register
-            ctl = self.bus.read_byte_data(self.address, APDS9960_CONTROL)
-            if ctl != 0x2C:
-                print(
-                    f"APDS9960 Warning: CONTROL register mismatch! Expected 0x2C, got 0x{ctl:02X}"
-                )
-                # Retry once
-                time.sleep(0.01)
-                self.bus.write_byte_data(self.address, APDS9960_CONTROL, 0x2C)
-                ctl = self.bus.read_byte_data(self.address, APDS9960_CONTROL)
-                if ctl != 0x2C:
-                    print(
-                        f"APDS9960 Error: CONTROL register failed to set! Got 0x{ctl:02X}"
-                    )
-
-            # Proximity pulse: 8 pulses, 32us length (matches gesture sensor)
-            # 0x80 (PPLEN=32us) | 0x07 (PPULSE=8) = 0x87
-            self.bus.write_byte_data(self.address, APDS9960_PPULSE, 0x87)
-
-            # Verify PPULSE register
-            pulse = self.bus.read_byte_data(self.address, APDS9960_PPULSE)
-            if pulse != 0x87:
-                print(
-                    f"APDS9960 Warning: PPULSE register mismatch! Expected 0x87, got 0x{pulse:02X}"
-                )
-                # Retry once
-                time.sleep(0.01)
-                self.bus.write_byte_data(self.address, APDS9960_PPULSE, 0x87)
-
-            # Enable proximity and gesture (matched to gesture.py)
-            # gesture.py enables GEN | PEN. Even if we only need PEN, GEN might
-            # be required for stability on some clones or setups.
-            enable = self.bus.read_byte_data(self.address, APDS9960_ENABLE)
-            self.bus.write_byte_data(
-                self.address, APDS9960_ENABLE, enable | APDS9960_GEN | APDS9960_PEN
-            )
+            # Note: The Adafruit library handles configuration.
+            # If we need specific tuning (like gain or pulse length), we can set properties:
+            # self.sensor.proximity_gain = 0  # 1x (default is usually 4x or 8x depending on lib version)
+            # The library defaults are generally robust.
 
             time.sleep(0.1)
+            print(f"  APDS9960 initialized successfully on bus {self.bus_number}")
 
         except Exception as e:
-            print(f"APDS9960: Failed to initialize on bus {self.bus.bus_number}: {e}")
+            print(f"APDS9960: Failed to initialize on bus {self.bus_number}: {e}")
             print("  Falling back to simulation mode")
             self.sim_mode = True
 
@@ -122,13 +78,12 @@ class APDS9960:
         Returns:
             Raw proximity value (0-255)
         """
-        if self.sim_mode:
+        if self.sim_mode or self.sensor is None:
             return 0
 
         try:
-            # Small delay to ensure bus is ready (helps with timing differences between hardware/software I2C)
-            time.sleep(0.002)
-            return int(self.bus.read_byte_data(self.address, APDS9960_PDATA))
+            # Adafruit lib returns 0-255 directly via .proximity property
+            return int(self.sensor.proximity)
         except Exception as e:
             print(f"APDS9960: Read error: {e}")
             return 0
