@@ -132,8 +132,8 @@ class RobotControlCenter(ProximityViewer):
         def create_key_label(text):
             lbl = QtWidgets.QLabel(text)
             lbl.setAlignment(QtCore.Qt.AlignCenter)
-            lbl.setFont(QtGui.QFont("Arial", 12, QtGui.QFont.Bold))
-            lbl.setFixedSize(60, 60)
+            lbl.setFont(QtGui.QFont("Arial", 24, QtGui.QFont.Bold))
+            lbl.setFixedSize(100, 100)
             lbl.setStyleSheet(
                 "background-color: #444; color: #aaa; border-radius: 4px; border: 1px solid #555;"
             )
@@ -144,7 +144,7 @@ class RobotControlCenter(ProximityViewer):
         self.key_s = create_key_label("S")
         self.key_d = create_key_label("D")
         self.key_pause = create_key_label("PAUSE")
-        self.key_pause.setFixedSize(190, 40)
+        self.key_pause.setFixedSize(310, 80)
 
         # Grid placement:
         #   W
@@ -376,51 +376,59 @@ class RobotControlCenter(ProximityViewer):
         style_active = "background-color: #2e2; color: #000; border-radius: 4px; border: 1px solid #2f2;"
         style_blocked = "background-color: #a33; color: #ccc; border-radius: 4px; border: 1px solid #c44;"  # Red-ish but visible text
         style_pressed_blocked = "background-color: #f00; color: #fff; border-radius: 4px; border: 2px solid #fff;"  # Bright red
+        style_paused_red = "background-color: #800; color: #eee; border-radius: 4px; border: 1px solid #a00;"  # Dark red for paused
 
-        # Forward (W)
-        # Blocked if ANY edge detected
-        if self._edge_detected:
-            # If trying to move forward, show bright red
-            if self._v_mult > 0:
-                self.key_w.setStyleSheet(style_pressed_blocked)
-            else:
-                self.key_w.setStyleSheet(style_blocked)
+        # Global Pause Check
+        if self.is_paused:
+            self.key_w.setStyleSheet(style_paused_red)
+            self.key_a.setStyleSheet(style_paused_red)
+            self.key_s.setStyleSheet(style_paused_red)
+            self.key_d.setStyleSheet(style_paused_red)
         else:
-            # Safe
-            if self._v_mult > 0:
-                self.key_w.setStyleSheet(style_active)
+            # Forward (W)
+            # Blocked if ANY edge detected
+            if self._edge_detected:
+                # If trying to move forward, show bright red
+                if self._v_mult > 0:
+                    self.key_w.setStyleSheet(style_pressed_blocked)
+                else:
+                    self.key_w.setStyleSheet(style_blocked)
             else:
-                self.key_w.setStyleSheet(style_idle)
+                # Safe
+                if self._v_mult > 0:
+                    self.key_w.setStyleSheet(style_active)
+                else:
+                    self.key_w.setStyleSheet(style_idle)
 
-        # Back (S) - Always safe usually
-        if self._v_mult < 0:
-            self.key_s.setStyleSheet(style_active)
-        else:
-            self.key_s.setStyleSheet(style_idle)
+            # Back (S) - Always safe usually
+            if self._v_mult < 0:
+                self.key_s.setStyleSheet(style_active)
+            else:
+                self.key_s.setStyleSheet(style_idle)
 
-        # Left (A) - Blocked if Left Sensor Triggered
-        if not self._safe_left:
-            if self._omega_mult > 0:  # Trying to turn left
-                self.key_a.setStyleSheet(style_pressed_blocked)
+            # Left (A) - Blocked if Left Sensor Triggered
+            if not self._safe_left:
+                if self._omega_mult > 0:  # Trying to turn left
+                    self.key_a.setStyleSheet(style_pressed_blocked)
+                else:
+                    self.key_a.setStyleSheet(style_blocked)
             else:
-                self.key_a.setStyleSheet(style_blocked)
-        else:
-            if self._omega_mult > 0:
-                self.key_a.setStyleSheet(style_active)
-            else:
-                self.key_a.setStyleSheet(style_idle)
+                if self._omega_mult > 0:
+                    self.key_a.setStyleSheet(style_active)
+                else:
+                    self.key_a.setStyleSheet(style_idle)
 
-        # Right (D) - Blocked if Right Sensor Triggered
-        if not self._safe_right:
-            if self._omega_mult < 0:  # Trying to turn right
-                self.key_d.setStyleSheet(style_pressed_blocked)
+            # Right (D) - Blocked if Right Sensor Triggered
+            if not self._safe_right:
+                if self._omega_mult < 0:  # Trying to turn right
+                    self.key_d.setStyleSheet(style_pressed_blocked)
+                else:
+                    self.key_d.setStyleSheet(style_blocked)
             else:
-                self.key_d.setStyleSheet(style_blocked)
-        else:
-            if self._omega_mult < 0:
-                self.key_d.setStyleSheet(style_active)
-            else:
-                self.key_d.setStyleSheet(style_idle)
+                if self._omega_mult < 0:
+                    self.key_d.setStyleSheet(style_active)
+                else:
+                    self.key_d.setStyleSheet(style_idle)
 
         # Pause
         if self.is_paused:
