@@ -26,6 +26,7 @@ from .planning.coverage import CoveragePlanner
 from .planning.map2d import SweptMap
 from .control.fsm import SupervisorFSM, RobotState
 from .control.motion import MotionController
+from .control.wall_follower import WallFollower, WallState
 from .control.limits import VelocityLimiter
 from .utils.logs import TelemetryLogger
 from .utils.viz import Visualizer
@@ -120,6 +121,7 @@ class Deskinator:
         print("[Init] Initializing control...")
         self.fsm = SupervisorFSM()
         self.motion = MotionController()
+        self.wall_follower = WallFollower()
         self.limiter = VelocityLimiter()
 
         # Logging and visualization
@@ -395,20 +397,19 @@ class Deskinator:
                 self.pose_graph.optimize()
                 optimize_counter = 0
 
-            # Try rectangle fit
-            if self.rect_fit.fit():
-                if not self.fsm.rectangle_confident:
-                    rect = self.rect_fit.get_rectangle()
-                    if rect:
-                        print(
-                            f"[Map] Rectangle confident: {rect[3]:.2f} x {rect[4]:.2f} m"
-                        )
-                        self.fsm.rectangle_confident = True
-
-                        # Build coverage lanes
-                        self.coverage_planner.set_rectangle(rect)
-                        lanes = self.coverage_planner.build_lanes()
-                        print(f"[Map] Generated {len(lanes)} coverage lanes")
+            # Try rectangle fit (continuously update, but don't trigger state change yet)
+            self.rect_fit.fit()
+            
+            # Note: State transition to COVERAGE is now handled in loop_ctrl
+            # when Wall Follower completes the lap.
+            if self.fsm.rectangle_confident and not self.coverage_planner.lanes:
+                 # Only build lanes once when we become confident
+                 rect = self.rect_fit.get_rectangle()
+                 if rect:
+                     print(f"[Map] Rectangle confident: {rect[3]:.2f} x {rect[4]:.2f} m")
+                     self.coverage_planner.set_rectangle(rect)
+                     lanes = self.coverage_planner.build_lanes()
+                     print(f"[Map] Generated {len(lanes)} coverage lanes")
 
             self.map_timer.stop()
             rate.sleep()
@@ -424,8 +425,48 @@ class Deskinator:
             pose = self.ekf.pose()
             dt = 1.0 / ALG.FUSE_HZ
 
-            # Handle edge events if active
-            if self.motion.edge_event_active:
+            # Handle edge events if active (but let WallFollower handle edges during its phase)
+            if self.motion.edge_event_active and self.fsm.state != RobotState.BOUNDARY_DISCOVERY:
+                # TACTILE LOCALIZATION: If we hit an edge during coverage, correct position
+                if self.fsm.state == RobotState.COVERAGE and self.motion.edge_event_step == 0:
+                    # We just triggered the edge event. Snap to nearest wall.
+                    # Get current estimated heading
+                    curr_theta = pose[2]
+                    from .slam.frames import wrap_angle
+                    import numpy as np
+                    
+                    # Assume table is aligned (0, 90, 180, 270)
+                    # Find closest cardinal direction
+                    # 0 = East (x max), 90 = North (y max), 180 = West (x min), -90 = South (y min)
+                    cardinals = [0, np.pi/2, np.pi, -np.pi/2]
+                    
+                    # Get rectangle bounds
+                    rect = self.rect_fit.get_rectangle() # (cx, cy, heading, w, h)
+                    if rect:
+                        cx, cy, heading, w, h = rect
+                        # Assuming heading is small (~0) due to alignment
+                        min_x, max_x = cx - w/2, cx + w/2
+                        min_y, max_y = cy - h/2, cy + h/2
+                        
+                        walls = {
+                            0: (1.0, 0.0, -max_x),      # x - max_x = 0
+                            np.pi/2: (0.0, 1.0, -max_y), # y - max_y = 0
+                            np.pi: (1.0, 0.0, -min_x),   # x - min_x = 0 
+                            -np.pi/2: (0.0, 1.0, -min_y) # y - min_y = 0
+                        }
+                        
+                        best_angle = min(cardinals, key=lambda x: abs(wrap_angle(curr_theta - x)))
+                        
+                        if abs(wrap_angle(curr_theta - best_angle)) < np.deg2rad(30):
+                            # Only correct if we hit head-on
+                            if best_angle in walls:
+                                 line_params = walls[best_angle]
+                                 print(f"[Localize] Tactile update on wall angle {np.rad2deg(best_angle):.0f}")
+                                 self.ekf.update_line_constraint(line_params)
+                    else:
+                        # Fallback to swept map if rect not ready (shouldn't happen in COVERAGE)
+                        pass
+                
                 v_cmd, omega_cmd = self.motion.update_edge_event(pose, dt)
             elif getattr(self.motion, "recovery_active", False):
                 v_cmd, omega_cmd = self.motion.update_recovery(pose, dt)
@@ -450,9 +491,41 @@ class Deskinator:
                     v_cmd, omega_cmd = 0.0, 0.0
 
                 elif state == RobotState.BOUNDARY_DISCOVERY:
-                    v_cmd, omega_cmd = self.motion.cmd_boundary(
-                        pose, self.sensor_context
-                    )
+                    # Use robust Wall Follower
+                    v_cmd, omega_cmd = self.wall_follower.update(pose, self.sensor_context.get("sensors", []), dt)
+                    
+                    if self.wall_follower.state == WallState.DONE:
+                        print("[Main] Boundary lap complete - Closing Loop")
+                        # Close loop in Pose Graph
+                        # Find latest node
+                        if self.pose_graph.poses and self.wall_follower.lap_start_pose:
+                            last_node = max(self.pose_graph.poses.keys())
+                            
+                            # Find node closest to where the lap actually started (first wall contact)
+                            lap_start = self.wall_follower.lap_start_pose
+                            target_node = 0
+                            min_d = float('inf')
+                            
+                            for nid, npose in self.pose_graph.poses.items():
+                                # Only check nodes that existed before the lap end
+                                if nid < last_node - 10: 
+                                    d = (npose[0]-lap_start[0])**2 + (npose[1]-lap_start[1])**2
+                                    if d < min_d:
+                                        min_d = d
+                                        target_node = nid
+                            
+                            print(f"[Main] Closing loop: Node {last_node} -> Node {target_node} (dist {min_d**0.5:.3f}m)")
+                            self.pose_graph.add_manual_loop_closure(last_node, target_node)
+                            self.pose_graph.optimize()
+                            print("[Main] Pose graph optimized")
+                            
+                            # Sync EKF with optimized graph
+                            opt_pose = self.pose_graph.poses[last_node]
+                            self.ekf.set_pose(*opt_pose)
+                            print(f"[Main] EKF synced to {opt_pose}")
+                        
+                        # Tell FSM we are done
+                        self.fsm.rectangle_confident = True
 
                 elif state == RobotState.COVERAGE:
                     # Follow coverage path

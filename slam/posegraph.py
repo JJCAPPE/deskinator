@@ -69,9 +69,24 @@ class PoseGraph:
         """
         self.edges_yaw.append((i, yaw, Info))
 
-    def maybe_add_loop(
-        self, i: int, candidates: List[int], rect_ctx: Optional[dict] = None
-    ) -> bool:
+    def add_manual_loop_closure(self, i: int, j: int):
+        """
+        Force a loop closure between node i and j (assuming they are the same location).
+        Used when robot returns to start.
+        """
+        pose_i = self.poses[i]
+        pose_j = self.poses[j]
+        
+        # Measurement z_ij should be 0 if they are truly the same
+        # But we use the *estimated* difference to let the optimizer relax it?
+        # NO. If we know they are the same physical location, z_ij should be (0,0,0).
+        z_ij = (0.0, 0.0, 0.0)
+        
+        # High confidence
+        Info = np.diag([1000.0, 1000.0, 500.0])
+        
+        self.edges_loop.append((j, i, z_ij, Info))
+        self.graph.add_edge(j, i, type="loop")
         """
         Try to add loop closure constraint.
 

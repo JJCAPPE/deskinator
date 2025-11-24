@@ -39,15 +39,17 @@ class EKF:
             self.x = np.array([x0, y0, theta0])  # [x, y, θ]
             self.P = np.diag([0.01, 0.01, 0.01])
 
-        # Process noise
+        # Process noise - TUNED FOR GRIPPY WHEELS + GOOD GYRO
         if estimate_bias:
-            self.Q = np.diag([0.001, 0.001, 0.001, 0.0001])
+            # Lower noise for theta (trust gyro) and position (trust wheels)
+            self.Q = np.diag([0.0001, 0.0001, 0.00001, 0.00001])
         else:
-            self.Q = np.diag([0.001, 0.001, 0.001])
+            self.Q = np.diag([0.0001, 0.0001, 0.00001])
 
         # Measurement noise
-        self.R_gyro = 0.01  # Gyro yaw rate variance
+        self.R_gyro = 0.005  # Trust gyro measurements highly
         self.R_yaw = 0.1  # Absolute yaw variance (low weight)
+        self.R_line = 0.01  # Low variance for edge/line constraints
 
     def predict(self, dSL: float, dSR: float, dt: float):
         """
@@ -167,3 +169,40 @@ class EKF:
         self.x[0] = x
         self.x[1] = y
         self.x[2] = wrap_angle(theta)
+
+    def update_line_constraint(self, line_params: tuple[float, float, float]):
+        """
+        Update state with a line constraint (robot is ON the line).
+        Line equation: ax + by + c = 0
+
+        Args:
+            line_params: (a, b, c) normalized line parameters
+        """
+        a, b, c = line_params
+        
+        # Innovation: Distance from current estimated position to line
+        # We expect distance to be 0 (robot is at the edge)
+        # d = ax + by + c
+        curr_x, curr_y = self.x[0], self.x[1]
+        dist_pred = a * curr_x + b * curr_y + c
+        
+        # Measurement z is 0 (we are on the line)
+        z = 0.0
+        y = z - dist_pred
+
+        # Jacobian H = [dh/dx, dh/dy, dh/dtheta, ...]
+        # h(x) = a*x + b*y + c
+        # H = [a, b, 0]
+        H = np.zeros(len(self.x))
+        H[0] = a
+        H[1] = b
+        
+        # Kalman gain
+        # R_line was defined in __init__
+        S = H @ self.P @ H.T + self.R_line
+        K = self.P @ H.T / S
+
+        # Update
+        self.x += K * y
+        self.x[2] = wrap_angle(self.x[2])
+        self.P = (np.eye(len(self.x)) - np.outer(K, H)) @ self.P
