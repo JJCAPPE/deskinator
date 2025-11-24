@@ -51,21 +51,21 @@ class Geometry:
     STEPS_PER_M: float = (
         1000  # calibrated from physical test: 0.33m actual / 0.0625m odometry = 5.28x correction
     )
-    SENSOR_FWD: float = 0.189125  # m; sensors lead axle
+    SENSOR_FWD: float = 0.218500  # m; sensors lead axle +
     SENSOR_LAT: tuple[float, ...] = (
-        +0.08484,
-        -0.08484,
+        +0.119840,
+        -0.119840,
     )  # m; left and right sensor lateral positions
-    VAC_WIDTH: float = 0.198  # m; effective cleaned width
-    SENSOR_TO_VAC: float = 0.03949  # m; vacuum ahead of sensors
+    VAC_WIDTH: float = 0.200  # m; effective cleaned width
+    SENSOR_TO_VAC: float = -0.79308  # m; vacuum behind sensors
 
 
 @dataclass
 class Limits:
     """Motion limits for NEMA17 + A4988 @ 12V, 1A — desk-safe."""
 
-    V_BASE: float = 0.15 # m/s
-    V_MAX: float = 0.2 # m/s
+    V_BASE: float = 0.15  # m/s
+    V_MAX: float = 0.2  # m/s
     OMEGA_MAX: float = 1.0  # rad/s
     A_MAX: float = 0.60  # m/s^2
     ALPHA_MAX: float = 4.0  # rad/s^2
@@ -81,7 +81,7 @@ class Algo:
     EDGE_THRESH: float = 0.5  # APDS off-table threshold (norm.)
     EDGE_RAW_THRESH: int = 20  # APDS off-table raw threshold (raw < 20 = off table)
     GESTURE_RAW_THRESH: int = (
-        30 # Gesture sensor start/stop trigger (raw > 50 = hand present)
+        30  # Gesture sensor start/stop trigger (raw > 50 = hand present)
     )
     EDGE_DEBOUNCE: float = 0.06  # s
     EDGE_EWMA_ALPHA: float = 0.35  # smoothing factor for proximity filtering
