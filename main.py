@@ -141,6 +141,7 @@ class Deskinator:
             "filtered": list(self.edge_filters),
             "timestamp": time.time(),
         }
+        self.tactile_hits = []  # Track where we bumped walls for viz
         self.last_progress_time = time.time()
         self.last_recovery_time = 0.0
 
@@ -463,6 +464,7 @@ class Deskinator:
                                  line_params = walls[best_angle]
                                  print(f"[Localize] Tactile update on wall angle {np.rad2deg(best_angle):.0f}")
                                  self.ekf.update_line_constraint(line_params)
+                                 self.tactile_hits.append((pose[0], pose[1]))
                     else:
                         # Fallback to swept map if rect not ready (shouldn't happen in COVERAGE)
                         pass
@@ -611,8 +613,29 @@ class Deskinator:
 
                 # Update every 10th iteration to reduce overhead
                 if rate._last_time % 0.2 < 0.02:  # ~Every 0.2 seconds
+                    # Extract loop constraints for viz
+                    loop_constraints = []
+                    for i, j, _, _ in self.pose_graph.edges_loop:
+                        if i in self.pose_graph.poses and j in self.pose_graph.poses:
+                            p1 = self.pose_graph.poses[i]
+                            p2 = self.pose_graph.poses[j]
+                            loop_constraints.append(((p1[0], p1[1]), (p2[0], p2[1])))
+
+                    # Build status text
+                    cov_ratio = self.swept_map.coverage_ratio(self.rect_fit.get_rectangle()) if self.rect_fit.is_confident else 0.0
+                    state_str = self.fsm.get_state().name
+                    status_text = f"Mode: {state_str}\nCoverage: {cov_ratio:.1%}"
+
                     self.visualizer.update(
-                        poses, edge_points, rectangle, coverage_grid, bounds
+                        poses,
+                        edge_points,
+                        rectangle,
+                        coverage_grid,
+                        bounds,
+                        loop_constraints=loop_constraints,
+                        text_info=status_text,
+                        robot_state=state_str,
+                        tactile_hits=self.tactile_hits
                     )
 
             last_v, last_omega = v_limited, omega_limited

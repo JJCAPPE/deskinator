@@ -55,6 +55,10 @@ class Visualizer:
         rectangle: Optional[Tuple[float, float, float, float, float]],
         coverage_grid: Optional[np.ndarray],
         swept_map_bounds: Optional[Tuple[float, float, float, float]],
+        loop_constraints: Optional[List[Tuple[Tuple[float, float], Tuple[float, float]]]] = None,
+        text_info: str = "",
+        robot_state: str = "IDLE",
+        tactile_hits: Optional[List[Tuple[float, float]]] = None,
     ):
         """
         Update visualization.
@@ -65,6 +69,10 @@ class Visualizer:
             rectangle: Rectangle (cx, cy, heading, width, height) or None
             coverage_grid: Coverage grid array or None
             swept_map_bounds: (min_x, max_x, min_y, max_y) or None
+            loop_constraints: List of start/end point pairs for loop closures
+            text_info: Status text to display
+            robot_state: Current robot state string
+            tactile_hits: List of (x,y) points where tactile update occurred
         """
         if not self.enabled:
             return
@@ -72,6 +80,19 @@ class Visualizer:
         # Clear axes
         self.ax_map.clear()
         self.ax_coverage.clear()
+
+        # Status text
+        self.ax_map.text(0.02, 0.98, text_info, transform=self.ax_map.transAxes,
+                        verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+        # Plot loop constraints (SLAM connections)
+        if loop_constraints:
+            for p1, p2 in loop_constraints:
+                self.ax_map.plot(
+                    [p1[0], p2[0]], [p1[1], p2[1]], "g--", linewidth=1.5, alpha=0.6
+                )
+            # Add a dummy line for legend
+            self.ax_map.plot([], [], "g--", label="Loop Closure")
 
         # Plot trajectory
         if poses:
@@ -82,14 +103,32 @@ class Visualizer:
             # Current pose
             if len(poses) > 0:
                 x, y, theta = poses[-1]
-                self.ax_map.plot(x, y, "ro", markersize=8, label="Current")
+                
+                # State-based color
+                color = 'gray'
+                if 'BOUNDARY' in robot_state:
+                    color = 'orange'
+                elif 'COVERAGE' in robot_state:
+                    color = 'green'
+                elif 'DONE' in robot_state:
+                    color = 'blue'
+                elif 'ERROR' in robot_state:
+                    color = 'red'
+                    
+                self.ax_map.plot(x, y, "o", color=color, markersize=8, label="Current")
 
                 # Heading arrow
                 dx = 0.1 * np.cos(theta)
                 dy = 0.1 * np.sin(theta)
                 self.ax_map.arrow(
-                    x, y, dx, dy, head_width=0.03, head_length=0.05, fc="r", ec="r"
+                    x, y, dx, dy, head_width=0.03, head_length=0.05, fc=color, ec=color
                 )
+
+        # Plot tactile hits
+        if tactile_hits:
+            tx = [p[0] for p in tactile_hits]
+            ty = [p[1] for p in tactile_hits]
+            self.ax_map.plot(tx, ty, "rx", markersize=8, markeredgewidth=2, label="Tactile Correction")
 
         # Plot edge points
         if edge_points:
