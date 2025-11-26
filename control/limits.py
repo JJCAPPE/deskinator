@@ -5,7 +5,10 @@ Implements acceleration and jerk limits for smooth motion.
 """
 
 import numpy as np
-from ..config import LIMS
+try:
+    from ..config import LIMS
+except ImportError:
+    from config import LIMS
 
 
 class VelocityLimiter:

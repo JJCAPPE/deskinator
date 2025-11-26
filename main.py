@@ -10,27 +10,50 @@ import signal
 import sys
 from typing import List, Tuple
 
-from .config import PINS, I2C, GEOM, LIMS, ALG
-from .hw.gpio import gpio_manager
-from .hw.stepper import StepperDrive
-from .hw.vacuum import Vacuum
-from .hw.buzzer import Buzzer
-from .hw.i2c import I2CBus
-from .hw.apds9960 import APDS9960
-from .hw.mpu6050 import MPU6050
-from .slam.ekf import EKF
-from .slam.posegraph import PoseGraph
-from .slam.rect_fit import RectangleFit
-from .slam.frames import transform_point
-from .planning.coverage import CoveragePlanner
-from .planning.map2d import SweptMap
-from .control.fsm import SupervisorFSM, RobotState
-from .control.motion import MotionController
-from .control.wall_follower import WallFollower, WallState
-from .control.limits import VelocityLimiter
-from .utils.logs import TelemetryLogger
-from .utils.viz import Visualizer
-from .utils.timing import RateTimer, LoopTimer
+try:
+    from .config import PINS, I2C, GEOM, LIMS, ALG
+    from .hw.gpio import gpio_manager
+    from .hw.stepper import StepperDrive
+    from .hw.vacuum import Vacuum
+    from .hw.led import LED
+    from .hw.i2c import I2CBus
+    from .hw.apds9960 import APDS9960
+    from .hw.mpu6050 import MPU6050
+    from .slam.ekf import EKF
+    from .slam.posegraph import PoseGraph
+    from .slam.rect_fit import RectangleFit
+    from .slam.frames import transform_point
+    from .planning.coverage import CoveragePlanner
+    from .planning.map2d import SweptMap
+    from .control.fsm import SupervisorFSM, RobotState
+    from .control.motion import MotionController
+    from .control.wall_follower import WallFollower, WallState
+    from .control.limits import VelocityLimiter
+    from .utils.logs import TelemetryLogger
+    from .utils.viz import Visualizer
+    from .utils.timing import RateTimer, LoopTimer
+except ImportError:
+    from config import PINS, I2C, GEOM, LIMS, ALG
+    from hw.gpio import gpio_manager
+    from hw.stepper import StepperDrive
+    from hw.vacuum import Vacuum
+    from hw.led import LED
+    from hw.i2c import I2CBus
+    from hw.apds9960 import APDS9960
+    from hw.mpu6050 import MPU6050
+    from slam.ekf import EKF
+    from slam.posegraph import PoseGraph
+    from slam.rect_fit import RectangleFit
+    from slam.frames import transform_point
+    from planning.coverage import CoveragePlanner
+    from planning.map2d import SweptMap
+    from control.fsm import SupervisorFSM, RobotState
+    from control.motion import MotionController
+    from control.wall_follower import WallFollower, WallState
+    from control.limits import VelocityLimiter
+    from utils.logs import TelemetryLogger
+    from utils.viz import Visualizer
+    from utils.timing import RateTimer, LoopTimer
 
 
 class Deskinator:
@@ -52,12 +75,12 @@ class Deskinator:
         self.stepper = StepperDrive()
         self.vacuum = Vacuum()
 
-        self.buzzer = None
+        self.led = None
         try:
-            self.buzzer = Buzzer()
-            print(f"  Buzzer ready on GPIO{PINS.BUZZER}")
+            self.led = LED()
+            print(f"  LED ready on GPIO{PINS.LED}")
         except Exception as e:
-            print(f"[Init] Warning: Buzzer unavailable ({e})")
+            print(f"[Init] Warning: LED unavailable ({e})")
 
         self.gesture = None
         try:
@@ -76,25 +99,29 @@ class Deskinator:
         # I2C devices
         # Proximity sensors on separate buses
         self.sensors = []
-        
+
         # Left sensor on bus 7 (GPIO19/GPIO26)
         try:
             left_i2c = I2CBus(I2C.LEFT_SENSOR_BUS)
             left_sensor = APDS9960(left_i2c, I2C.APDS_ADDR)
             left_sensor.init()
             self.sensors.append(left_sensor)
-            print(f"  Left APDS9960 on bus {I2C.LEFT_SENSOR_BUS} @ 0x{I2C.APDS_ADDR:02x}")
+            print(
+                f"  Left APDS9960 on bus {I2C.LEFT_SENSOR_BUS} @ 0x{I2C.APDS_ADDR:02x}"
+            )
         except Exception as e:
             print(f"[Init] Warning: Left sensor unavailable ({e})")
             self.sensors.append(None)
-        
+
         # Right sensor on bus 1 (GPIO2/GPIO3 - hardware I2C)
         try:
             right_i2c = I2CBus(I2C.RIGHT_SENSOR_BUS)
             right_sensor = APDS9960(right_i2c, I2C.APDS_ADDR)
             right_sensor.init()
             self.sensors.append(right_sensor)
-            print(f"  Right APDS9960 on bus {I2C.RIGHT_SENSOR_BUS} @ 0x{I2C.APDS_ADDR:02x}")
+            print(
+                f"  Right APDS9960 on bus {I2C.RIGHT_SENSOR_BUS} @ 0x{I2C.APDS_ADDR:02x}"
+            )
         except Exception as e:
             print(f"[Init] Warning: Right sensor unavailable ({e})")
             self.sensors.append(None)
@@ -156,7 +183,7 @@ class Deskinator:
     def scan_i2c(self):
         """Scan I2C buses and print devices."""
         print("[I2C] Scanning buses...")
-        
+
         print(f"\n  Bus {I2C.LEFT_SENSOR_BUS} (Left sensor):")
         try:
             left_bus = I2CBus(I2C.LEFT_SENSOR_BUS)
@@ -166,7 +193,7 @@ class Deskinator:
                 print(f"      0x{addr:02x}")
         except Exception as e:
             print(f"    Error: {e}")
-        
+
         print(f"\n  Bus {I2C.RIGHT_SENSOR_BUS} (Right sensor):")
         try:
             right_bus = I2CBus(I2C.RIGHT_SENSOR_BUS)
@@ -198,25 +225,25 @@ class Deskinator:
         self.imu.bias_calibrate(duration=2.0)
         print("[Calibrate] IMU calibration complete")
 
-    def _notify_start_beep(self):
-        """Play start notification on buzzer."""
-        if not self.buzzer:
+    def _notify_start_blink(self):
+        """Play start notification on LED."""
+        if not self.led:
             return
 
         try:
-            self.buzzer.beep_pattern(count=3, duration=0.1, pause=0.1)
+            self.led.blink_pattern(count=3, duration=0.1, pause=0.1)
         except Exception as e:
-            print(f"[Start] Buzzer error: {e}")
+            print(f"[Start] LED error: {e}")
 
-    def _notify_finish_beep(self):
-        """Play finish notification on buzzer asynchronously."""
-        if not self.buzzer:
+    def _notify_finish_blink(self):
+        """Play finish notification on LED asynchronously."""
+        if not self.led:
             return
 
         try:
-            self.buzzer.beep_async(count=2, duration=0.1, pause=0.1)
+            self.led.blink_async(count=2, duration=0.1, pause=0.1)
         except Exception as e:
-            print(f"[Shutdown] Buzzer error: {e}")
+            print(f"[Shutdown] LED error: {e}")
 
     def _await_gesture_start(self) -> bool:
         """Block until a gesture is detected to start cleaning."""
@@ -226,13 +253,13 @@ class Deskinator:
         if not self.gesture:
             print("[Start] Gesture sensor unavailable; auto-starting")
             self.start_signal = True
-            self._notify_start_beep()
+            self._notify_start_blink()
             return True
 
         if getattr(self.gesture, "sim_mode", False):
             print("[Start] Gesture sensor simulation mode; auto-starting")
             self.start_signal = True
-            self._notify_start_beep()
+            self._notify_start_blink()
             return True
 
         print("[Start] Hold your hand near the gesture sensor to begin...")
@@ -243,9 +270,9 @@ class Deskinator:
                 if raw_val > ALG.GESTURE_RAW_THRESH:
                     print(f"[Start] Proximity trigger detected (raw={raw_val})")
                     self.start_signal = True
-                    self._notify_start_beep()
+                    self._notify_start_blink()
                     return True
-                
+
                 time.sleep(0.1)
         except KeyboardInterrupt:
             print("\n[Start] Gesture wait cancelled by user")
@@ -276,7 +303,9 @@ class Deskinator:
                     reading = sensor.read_proximity_raw()
                     sensor_readings.append(reading)
                 else:
-                    sensor_readings.append(255)  # Default to "on table" if sensor unavailable (high value)
+                    sensor_readings.append(
+                        255
+                    )  # Default to "on table" if sensor unavailable (high value)
 
             # Check for edge events
             self._check_edge_events(sensor_readings)
@@ -290,7 +319,7 @@ class Deskinator:
             }
 
             self.sense_timer.stop()
-            rate.sleep()
+            await rate.sleep_async()
 
     def _check_edge_events(self, sensors: List[int]):
         """Check for edge detection events using raw proximity values."""
@@ -301,8 +330,14 @@ class Deskinator:
         EDGE_RAW_THRESHOLD = ALG.EDGE_RAW_THRESH
 
         # Single sensor per side now
-        left_raw = sensors[I2C.LEFT_SENSOR_IDX] if I2C.LEFT_SENSOR_IDX < len(sensors) else 255
-        right_raw = sensors[I2C.RIGHT_SENSOR_IDX] if I2C.RIGHT_SENSOR_IDX < len(sensors) else 255
+        left_raw = (
+            sensors[I2C.LEFT_SENSOR_IDX] if I2C.LEFT_SENSOR_IDX < len(sensors) else 255
+        )
+        right_raw = (
+            sensors[I2C.RIGHT_SENSOR_IDX]
+            if I2C.RIGHT_SENSOR_IDX < len(sensors)
+            else 255
+        )
 
         # Check if sensor is off table (raw value < threshold)
         left_off = left_raw < EDGE_RAW_THRESHOLD
@@ -348,7 +383,7 @@ class Deskinator:
         else:
             # Fallback: use average of left/right positions
             sensor_lat = GEOM.SENSOR_LAT[0] if side == "left" else GEOM.SENSOR_LAT[-1]
-        
+
         sensor_pos = (GEOM.SENSOR_FWD, sensor_lat)
 
         # Transform to world frame
@@ -381,7 +416,10 @@ class Deskinator:
                 # Add odometry edge
                 if node_id > 0:
                     # Compute relative pose
-                    from .slam.frames import pose_difference
+                    try:
+                        from .slam.frames import pose_difference
+                    except ImportError:
+                        from slam.frames import pose_difference
 
                     z_ij = pose_difference(self.last_node_pose, pose)
 
@@ -400,20 +438,20 @@ class Deskinator:
 
             # Try rectangle fit (continuously update, but don't trigger state change yet)
             self.rect_fit.fit()
-            
+
             # Note: State transition to COVERAGE is now handled in loop_ctrl
             # when Wall Follower completes the lap.
             if self.fsm.rectangle_confident and not self.coverage_planner.lanes:
-                 # Only build lanes once when we become confident
-                 rect = self.rect_fit.get_rectangle()
-                 if rect:
-                     print(f"[Map] Rectangle confident: {rect[3]:.2f} x {rect[4]:.2f} m")
-                     self.coverage_planner.set_rectangle(rect)
-                     lanes = self.coverage_planner.build_lanes()
-                     print(f"[Map] Generated {len(lanes)} coverage lanes")
+                # Only build lanes once when we become confident
+                rect = self.rect_fit.get_rectangle()
+                if rect:
+                    print(f"[Map] Rectangle confident: {rect[3]:.2f} x {rect[4]:.2f} m")
+                    self.coverage_planner.set_rectangle(rect)
+                    lanes = self.coverage_planner.build_lanes()
+                    print(f"[Map] Generated {len(lanes)} coverage lanes")
 
             self.map_timer.stop()
-            rate.sleep()
+            await rate.sleep_async()
 
     async def loop_ctrl(self):
         """Control loop @ 50 Hz."""
@@ -427,48 +465,61 @@ class Deskinator:
             dt = 1.0 / ALG.FUSE_HZ
 
             # Handle edge events if active (but let WallFollower handle edges during its phase)
-            if self.motion.edge_event_active and self.fsm.state != RobotState.BOUNDARY_DISCOVERY:
+            if (
+                self.motion.edge_event_active
+                and self.fsm.state != RobotState.BOUNDARY_DISCOVERY
+            ):
                 # TACTILE LOCALIZATION: If we hit an edge during coverage, correct position
-                if self.fsm.state == RobotState.COVERAGE and self.motion.edge_event_step == 0:
+                if (
+                    self.fsm.state == RobotState.COVERAGE
+                    and self.motion.edge_event_step == 0
+                ):
                     # We just triggered the edge event. Snap to nearest wall.
                     # Get current estimated heading
                     curr_theta = pose[2]
-                    from .slam.frames import wrap_angle
+                    try:
+                        from .slam.frames import wrap_angle
+                    except ImportError:
+                        from slam.frames import wrap_angle
                     import numpy as np
-                    
+
                     # Assume table is aligned (0, 90, 180, 270)
                     # Find closest cardinal direction
                     # 0 = East (x max), 90 = North (y max), 180 = West (x min), -90 = South (y min)
-                    cardinals = [0, np.pi/2, np.pi, -np.pi/2]
-                    
+                    cardinals = [0, np.pi / 2, np.pi, -np.pi / 2]
+
                     # Get rectangle bounds
-                    rect = self.rect_fit.get_rectangle() # (cx, cy, heading, w, h)
+                    rect = self.rect_fit.get_rectangle()  # (cx, cy, heading, w, h)
                     if rect:
                         cx, cy, heading, w, h = rect
                         # Assuming heading is small (~0) due to alignment
-                        min_x, max_x = cx - w/2, cx + w/2
-                        min_y, max_y = cy - h/2, cy + h/2
-                        
+                        min_x, max_x = cx - w / 2, cx + w / 2
+                        min_y, max_y = cy - h / 2, cy + h / 2
+
                         walls = {
-                            0: (1.0, 0.0, -max_x),      # x - max_x = 0
-                            np.pi/2: (0.0, 1.0, -max_y), # y - max_y = 0
-                            np.pi: (1.0, 0.0, -min_x),   # x - min_x = 0 
-                            -np.pi/2: (0.0, 1.0, -min_y) # y - min_y = 0
+                            0: (1.0, 0.0, -max_x),  # x - max_x = 0
+                            np.pi / 2: (0.0, 1.0, -max_y),  # y - max_y = 0
+                            np.pi: (1.0, 0.0, -min_x),  # x - min_x = 0
+                            -np.pi / 2: (0.0, 1.0, -min_y),  # y - min_y = 0
                         }
-                        
-                        best_angle = min(cardinals, key=lambda x: abs(wrap_angle(curr_theta - x)))
-                        
+
+                        best_angle = min(
+                            cardinals, key=lambda x: abs(wrap_angle(curr_theta - x))
+                        )
+
                         if abs(wrap_angle(curr_theta - best_angle)) < np.deg2rad(30):
                             # Only correct if we hit head-on
                             if best_angle in walls:
-                                 line_params = walls[best_angle]
-                                 print(f"[Localize] Tactile update on wall angle {np.rad2deg(best_angle):.0f}")
-                                 self.ekf.update_line_constraint(line_params)
-                                 self.tactile_hits.append((pose[0], pose[1]))
+                                line_params = walls[best_angle]
+                                print(
+                                    f"[Localize] Tactile update on wall angle {np.rad2deg(best_angle):.0f}"
+                                )
+                                self.ekf.update_line_constraint(line_params)
+                                self.tactile_hits.append((pose[0], pose[1]))
                     else:
                         # Fallback to swept map if rect not ready (shouldn't happen in COVERAGE)
                         pass
-                
+
                 v_cmd, omega_cmd = self.motion.update_edge_event(pose, dt)
             elif getattr(self.motion, "recovery_active", False):
                 v_cmd, omega_cmd = self.motion.update_recovery(pose, dt)
@@ -486,7 +537,16 @@ class Deskinator:
                     "error": False,
                 }
 
+                # DEBUG: Print FSM updates periodically or on change
+                old_state = self.fsm.state
                 state = self.fsm.update(context)
+                if old_state != state:
+                    print(f"[DEBUG] FSM Transition: {old_state} -> {state}")
+
+                if rate.last_time % 1.0 < 0.02:  # Print heartbeat every ~1s
+                    print(
+                        f"[DEBUG] Heartbeat: State={state.name}, Pose={pose}, StartSignal={self.start_signal}"
+                    )
 
                 # Generate motion commands based on state
                 if state == RobotState.WAIT_START:
@@ -494,38 +554,46 @@ class Deskinator:
 
                 elif state == RobotState.BOUNDARY_DISCOVERY:
                     # Use robust Wall Follower
-                    v_cmd, omega_cmd = self.wall_follower.update(pose, self.sensor_context.get("sensors", []), dt)
-                    
+                    v_cmd, omega_cmd = self.wall_follower.update(
+                        pose, self.sensor_context.get("sensors", []), dt
+                    )
+
                     if self.wall_follower.state == WallState.DONE:
                         print("[Main] Boundary lap complete - Closing Loop")
                         # Close loop in Pose Graph
                         # Find latest node
                         if self.pose_graph.poses and self.wall_follower.lap_start_pose:
                             last_node = max(self.pose_graph.poses.keys())
-                            
+
                             # Find node closest to where the lap actually started (first wall contact)
                             lap_start = self.wall_follower.lap_start_pose
                             target_node = 0
-                            min_d = float('inf')
-                            
+                            min_d = float("inf")
+
                             for nid, npose in self.pose_graph.poses.items():
                                 # Only check nodes that existed before the lap end
-                                if nid < last_node - 10: 
-                                    d = (npose[0]-lap_start[0])**2 + (npose[1]-lap_start[1])**2
+                                if nid < last_node - 10:
+                                    d = (npose[0] - lap_start[0]) ** 2 + (
+                                        npose[1] - lap_start[1]
+                                    ) ** 2
                                     if d < min_d:
                                         min_d = d
                                         target_node = nid
-                            
-                            print(f"[Main] Closing loop: Node {last_node} -> Node {target_node} (dist {min_d**0.5:.3f}m)")
-                            self.pose_graph.add_manual_loop_closure(last_node, target_node)
+
+                            print(
+                                f"[Main] Closing loop: Node {last_node} -> Node {target_node} (dist {min_d**0.5:.3f}m)"
+                            )
+                            self.pose_graph.add_manual_loop_closure(
+                                last_node, target_node
+                            )
                             self.pose_graph.optimize()
                             print("[Main] Pose graph optimized")
-                            
+
                             # Sync EKF with optimized graph
                             opt_pose = self.pose_graph.poses[last_node]
                             self.ekf.set_pose(*opt_pose)
                             print(f"[Main] EKF synced to {opt_pose}")
-                        
+
                         # Tell FSM we are done
                         self.fsm.rectangle_confident = True
 
@@ -542,7 +610,7 @@ class Deskinator:
                             # Advance to next waypoint (which may advance to next lane)
                             self.coverage_planner.advance_waypoint()
                             self.motion.reset_path_progress()
-                            
+
                             # Check if all lanes are complete
                             if self.coverage_planner.is_complete():
                                 print("[Coverage] All lanes complete")
@@ -612,7 +680,7 @@ class Deskinator:
                 )
 
                 # Update every 10th iteration to reduce overhead
-                if rate._last_time % 0.2 < 0.02:  # ~Every 0.2 seconds
+                if rate.last_time % 0.2 < 0.02:  # ~Every 0.2 seconds
                     # Extract loop constraints for viz
                     loop_constraints = []
                     for i, j, _, _ in self.pose_graph.edges_loop:
@@ -622,7 +690,11 @@ class Deskinator:
                             loop_constraints.append(((p1[0], p1[1]), (p2[0], p2[1])))
 
                     # Build status text
-                    cov_ratio = self.swept_map.coverage_ratio(self.rect_fit.get_rectangle()) if self.rect_fit.is_confident else 0.0
+                    cov_ratio = (
+                        self.swept_map.coverage_ratio(self.rect_fit.get_rectangle())
+                        if self.rect_fit.is_confident
+                        else 0.0
+                    )
                     state_str = self.fsm.get_state().name
                     status_text = f"Mode: {state_str}\nCoverage: {cov_ratio:.1%}"
 
@@ -635,18 +707,18 @@ class Deskinator:
                         loop_constraints=loop_constraints,
                         text_info=status_text,
                         robot_state=state_str,
-                        tactile_hits=self.tactile_hits
+                        tactile_hits=self.tactile_hits,
                     )
 
             last_v, last_omega = v_limited, omega_limited
 
             self.ctrl_timer.stop()
-            rate.sleep()
+            await rate.sleep_async()
 
             # Check if done
             if self.fsm.is_done():
                 if not self.finish_alerted:
-                    self._notify_finish_beep()
+                    self._notify_finish_blink()
                     self.finish_alerted = True
                 print("[Main] Mission complete!")
                 self.running = False
@@ -716,11 +788,11 @@ class Deskinator:
             self.visualizer.close()
 
         # Cleanup peripherals
-        if self.buzzer:
-            self.buzzer.cleanup()
-        
+        if self.led:
+            self.led.cleanup()
+
         # Close gesture sensor bus if wrapper exists
-        if self.gesture and hasattr(self.gesture, 'bus_wrapper'):
+        if self.gesture and hasattr(self.gesture, "bus_wrapper"):
             try:
                 self.gesture.bus_wrapper.close()
             except:

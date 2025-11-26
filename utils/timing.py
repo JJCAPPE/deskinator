@@ -5,6 +5,7 @@ Provides rate limiting and loop timing.
 """
 
 import time
+import asyncio
 
 
 class RateTimer:
@@ -28,6 +29,16 @@ class RateTimer:
 
         if elapsed < self.period:
             time.sleep(self.period - elapsed)
+
+        self.last_time = time.time()
+
+    async def sleep_async(self):
+        """Async sleep to maintain loop rate."""
+        current_time = time.time()
+        elapsed = current_time - self.last_time
+
+        if elapsed < self.period:
+            await asyncio.sleep(self.period - elapsed)
 
         self.last_time = time.time()
 
@@ -84,7 +95,7 @@ class LoopTimer:
             Dictionary with mean, max, min duration (ms)
         """
         if not self.durations:
-            return {"mean_ms": 0.0, "max_ms": 0.0, "min_ms": 0.0}
+            return {"mean_ms": 0.0, "max_ms": 0.0, "min_ms": 0.0, "count": 0}
 
         durations_ms = [d * 1000 for d in self.durations]
 

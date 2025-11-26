@@ -32,9 +32,20 @@ class Visualizer:
         if not self.enabled:
             return
 
-        plt.ion()  # Interactive mode
-        self.fig, self.axes = plt.subplots(1, 2, figsize=figsize)
+        # Force non-interactive backend if on MacOS to avoid main thread issues?
+        # Actually, let's try standard non-blocking first.
+        # If this blocks, it might be because pyplot.show() is expected or interaction mode issues.
+        
+        try:
+            plt.ion()  # Interactive mode
+            self.fig, self.axes = plt.subplots(1, 2, figsize=figsize)
+        except Exception as e:
+            print(f"[Viz] Error initializing matplotlib: {e}")
+            self.enabled = False
+            return
+
         self.ax_map = self.axes[0]
+
         self.ax_coverage = self.axes[1]
 
         self.ax_map.set_xlabel("X (m)")
@@ -47,6 +58,10 @@ class Visualizer:
         self.ax_coverage.set_ylabel("Y (m)")
         self.ax_coverage.set_title("Coverage Map")
         self.ax_coverage.set_aspect("equal")
+
+        # Show the window immediately (non-blocking)
+        plt.show(block=False)
+        plt.pause(0.1)
 
     def update(
         self,
@@ -159,8 +174,11 @@ class Visualizer:
             t = Affine2D().rotate_around(0, 0, heading).translate(cx, cy)
             rect_patch.set_transform(t + self.ax_map.transData)
             self.ax_map.add_patch(rect_patch)
+        
+        # Only call legend if there are labeled artists
+        if (poses or edge_points or rectangle or loop_constraints or tactile_hits):
+             self.ax_map.legend()
 
-        self.ax_map.legend()
         self.ax_map.set_xlabel("X (m)")
         self.ax_map.set_ylabel("Y (m)")
         self.ax_map.set_title("SLAM Map")

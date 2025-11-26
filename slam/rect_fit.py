@@ -7,8 +7,12 @@ the rectangular desk boundary.
 
 import numpy as np
 from typing import List, Tuple, Optional
-from ..config import ALG
-from .frames import wrap_angle
+try:
+    from ..config import ALG
+    from .frames import wrap_angle
+except ImportError:
+    from config import ALG
+    from slam.frames import wrap_angle
 
 
 class RectangleFit:

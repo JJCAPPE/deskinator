@@ -6,8 +6,12 @@ Inputs: wheel odometry (dSL, dSR) and gyro yaw rate.
 """
 
 import numpy as np
-from .frames import wrap_angle
-from config import GEOM
+try:
+    from .frames import wrap_angle
+    from ..config import GEOM
+except ImportError:
+    from slam.frames import wrap_angle
+    from config import GEOM
 
 
 class EKF:

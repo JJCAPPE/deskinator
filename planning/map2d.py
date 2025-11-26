@@ -6,8 +6,12 @@ Tracks which areas have been cleaned using a raster grid.
 
 import numpy as np
 from typing import Tuple, Optional
-from ..config import ALG, GEOM
-from ..slam.frames import rotation_matrix
+try:
+    from ..config import ALG, GEOM
+    from ..slam.frames import rotation_matrix
+except ImportError:
+    from config import ALG, GEOM
+    from slam.frames import rotation_matrix
 
 
 class SweptMap:

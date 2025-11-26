@@ -1,2 +1,1 @@
-- Make buttons on motor control bigger
 - Redo VIZ SIM

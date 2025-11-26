@@ -9,7 +9,10 @@ import numpy as np
 from scipy.optimize import least_squares
 import networkx as nx
 from typing import List, Tuple, Optional
-from .frames import wrap_angle, pose_difference
+try:
+    from .frames import wrap_angle, pose_difference
+except ImportError:
+    from slam.frames import wrap_angle, pose_difference
 
 
 class PoseGraph:
@@ -74,12 +77,7 @@ class PoseGraph:
         Force a loop closure between node i and j (assuming they are the same location).
         Used when robot returns to start.
         """
-        pose_i = self.poses[i]
-        pose_j = self.poses[j]
-        
         # Measurement z_ij should be 0 if they are truly the same
-        # But we use the *estimated* difference to let the optimizer relax it?
-        # NO. If we know they are the same physical location, z_ij should be (0,0,0).
         z_ij = (0.0, 0.0, 0.0)
         
         # High confidence
@@ -87,43 +85,6 @@ class PoseGraph:
         
         self.edges_loop.append((j, i, z_ij, Info))
         self.graph.add_edge(j, i, type="loop")
-        """
-        Try to add loop closure constraint.
-
-        Args:
-            i: Current node ID
-            candidates: List of candidate node IDs for loop closure
-            rect_ctx: Rectangle context (optional)
-
-        Returns:
-            True if loop closure was added
-        """
-        # Simple distance-based loop closure
-        pose_i = self.poses[i]
-
-        for j in candidates:
-            if j >= i:
-                continue
-
-            pose_j = self.poses[j]
-
-            # Check distance
-            dx = pose_i[0] - pose_j[0]
-            dy = pose_i[1] - pose_j[1]
-            dist = np.sqrt(dx * dx + dy * dy)
-
-            if dist < 0.06:  # Within LOOP_RADIUS
-                # Compute relative pose
-                z_ij = pose_difference(pose_j, pose_i)
-
-                # Add loop closure with moderate information
-                Info = np.diag([100.0, 100.0, 10.0])
-                self.edges_loop.append((j, i, z_ij, Info))
-                self.graph.add_edge(j, i, type="loop")
-
-                return True
-
-        return False
 
     def optimize(self):
         """
@@ -144,22 +105,10 @@ class PoseGraph:
         # Fix first pose (anchor)
         fixed_params = [0, 1, 2]
 
-        # Check if we have enough constraints
-        # Free variables: 3 * (len(node_ids) - 1) since first pose is fixed
-        # Residuals: 3 * len(self.edges_odom) + len(self.edges_yaw) + 3 * len(self.edges_loop)
-        n_free_vars = 3 * (len(node_ids) - 1)
-        n_residuals = (
-            3 * len(self.edges_odom)
-            + len(self.edges_yaw)
-            + 3 * len(self.edges_loop)
-        )
-
-        # Use 'trf' method if underconstrained, 'lm' otherwise
-        method = "trf" if n_residuals < n_free_vars else "lm"
-
-        # Optimize
+        # Always use 'trf' method - it's more robust and handles underdetermined 
+        # systems gracefully (unlike 'lm' which requires n_residuals >= n_variables)
         result = least_squares(
-            self._residuals, x0, args=(node_ids,), method=method, verbose=0
+            self._residuals, x0, args=(node_ids,), method="trf", verbose=0
         )
 
         # Update poses

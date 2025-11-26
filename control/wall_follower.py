@@ -7,7 +7,10 @@ import numpy as np
 import math
 from enum import Enum, auto
 from typing import Tuple, Optional, List
-from ..config import ALG, LIMS, GEOM, I2C
+try:
+    from ..config import ALG, LIMS, GEOM, I2C
+except ImportError:
+    from config import ALG, LIMS, GEOM, I2C
 
 class WallState(Enum):
     FIND_WALL = auto()      # Driving forward to find first edge
@@ -32,6 +35,7 @@ class WallFollower:
         self.follow_direction = -1 # -1 for Left (CCW), 1 for Right (CW)
         self.last_edge_time = 0.0
         self.dist_since_edge = 0.0
+        self.last_dist = 0.0
         
         # Lap closure
         self.lap_start_pose = None

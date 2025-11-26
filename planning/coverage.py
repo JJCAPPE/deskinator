@@ -6,8 +6,12 @@ Generates boustrophedon (lawn-mower) paths for cleaning coverage.
 
 import numpy as np
 from typing import List, Tuple, Optional
-from ..config import ALG, GEOM, LIMS
-from ..slam.frames import rotation_matrix
+try:
+    from ..config import ALG, GEOM, LIMS
+    from ..slam.frames import rotation_matrix
+except ImportError:
+    from config import ALG, GEOM, LIMS
+    from slam.frames import rotation_matrix
 
 
 class CoveragePlanner:

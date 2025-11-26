@@ -18,7 +18,7 @@ class Pins:
     LEFT_STEP: int = 22  # Driver Left  Step GPIO22
     LEFT_ENABLE: int = 27  # Driver Left  Enable GPIO27
     VACUUM_PWM: int = 5  # Vacuum MOSFET     GPIO5
-    BUZZER: int = 12  # Buzzer/Beeper      GPIO12
+    LED: int = 12  # LED                GPIO12
     GESTURE_SDA: int = 15  # Gesture APDS9960 SDA GPIO17
     GESTURE_SCL: int = 14  # Gesture APDS9960 SCL GPIO4
 

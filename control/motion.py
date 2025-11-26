@@ -4,8 +4,12 @@ Motion controllers for boundary following and path following.
 
 import numpy as np
 from typing import List, Tuple, Optional
-from ..config import LIMS, ALG, GEOM, I2C
-from ..slam.frames import wrap_angle
+try:
+    from ..config import LIMS, ALG, GEOM, I2C
+    from ..slam.frames import wrap_angle
+except ImportError:
+    from config import LIMS, ALG, GEOM, I2C
+    from slam.frames import wrap_angle
 
 
 class MotionController:
