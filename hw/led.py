@@ -24,7 +24,7 @@ class LED:
         self.is_active = False
         self.blink_thread = None
         self._stop_blink = False
-        
+
         # Setup GPIO
         gpio_manager.setup()
         gpio_manager.setup_output(self.led_pin, 0)
@@ -128,4 +128,3 @@ class LED:
         """Clean up resources."""
         self._stop_blink = True
         self.off()
-
