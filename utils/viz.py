@@ -9,12 +9,24 @@ from typing import List, Tuple, Optional
 
 try:
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Rectangle, Circle
+    from matplotlib.patches import Rectangle, Circle, FancyArrow
 
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
     print("Warning: matplotlib not available. Visualization disabled.")
+
+try:
+    from .config import GEOM
+except ImportError:
+    try:
+        from config import GEOM
+    except ImportError:
+        # Fallback defaults
+        class GEOM:
+            SENSOR_FWD = 0.2185
+            SENSOR_TO_VAC = -0.79308
+            VAC_WIDTH = 0.2
 
 
 class Visualizer:
@@ -35,7 +47,7 @@ class Visualizer:
         # Force non-interactive backend if on MacOS to avoid main thread issues?
         # Actually, let's try standard non-blocking first.
         # If this blocks, it might be because pyplot.show() is expected or interaction mode issues.
-        
+
         try:
             plt.ion()  # Interactive mode
             self.fig, self.axes = plt.subplots(1, 2, figsize=figsize)
@@ -70,10 +82,13 @@ class Visualizer:
         rectangle: Optional[Tuple[float, float, float, float, float]],
         coverage_grid: Optional[np.ndarray],
         swept_map_bounds: Optional[Tuple[float, float, float, float]],
-        loop_constraints: Optional[List[Tuple[Tuple[float, float], Tuple[float, float]]]] = None,
+        loop_constraints: Optional[
+            List[Tuple[Tuple[float, float], Tuple[float, float]]]
+        ] = None,
         text_info: str = "",
         robot_state: str = "IDLE",
         tactile_hits: Optional[List[Tuple[float, float]]] = None,
+        ground_truth_bounds: Optional[Tuple[float, float, float, float]] = None,
     ):
         """
         Update visualization.
@@ -88,6 +103,7 @@ class Visualizer:
             text_info: Status text to display
             robot_state: Current robot state string
             tactile_hits: List of (x,y) points where tactile update occurred
+            ground_truth_bounds: (min_x, max_x, min_y, max_y) for simulation ground truth table
         """
         if not self.enabled:
             return
@@ -97,8 +113,14 @@ class Visualizer:
         self.ax_coverage.clear()
 
         # Status text
-        self.ax_map.text(0.02, 0.98, text_info, transform=self.ax_map.transAxes,
-                        verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        self.ax_map.text(
+            0.02,
+            0.98,
+            text_info,
+            transform=self.ax_map.transAxes,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+        )
 
         # Plot loop constraints (SLAM connections)
         if loop_constraints:
@@ -118,18 +140,18 @@ class Visualizer:
             # Current pose
             if len(poses) > 0:
                 x, y, theta = poses[-1]
-                
+
                 # State-based color
-                color = 'gray'
-                if 'BOUNDARY' in robot_state:
-                    color = 'orange'
-                elif 'COVERAGE' in robot_state:
-                    color = 'green'
-                elif 'DONE' in robot_state:
-                    color = 'blue'
-                elif 'ERROR' in robot_state:
-                    color = 'red'
-                    
+                color = "gray"
+                if "BOUNDARY" in robot_state:
+                    color = "orange"
+                elif "COVERAGE" in robot_state:
+                    color = "green"
+                elif "DONE" in robot_state:
+                    color = "blue"
+                elif "ERROR" in robot_state:
+                    color = "red"
+
                 self.ax_map.plot(x, y, "o", color=color, markersize=8, label="Current")
 
                 # Heading arrow
@@ -139,11 +161,39 @@ class Visualizer:
                     x, y, dx, dy, head_width=0.03, head_length=0.05, fc=color, ec=color
                 )
 
+                # Vacuum position (behind robot)
+                vac_offset = GEOM.SENSOR_FWD + GEOM.SENSOR_TO_VAC
+                vac_x = x + vac_offset * np.cos(theta)
+                vac_y = y + vac_offset * np.sin(theta)
+
+                # Draw vacuum as small rectangle
+                vac_width = GEOM.VAC_WIDTH
+                vac_rect = Rectangle(
+                    (-vac_width / 2, -0.02),
+                    vac_width,
+                    0.04,
+                    facecolor="purple",
+                    edgecolor="purple",
+                    alpha=0.5,
+                )
+                from matplotlib.transforms import Affine2D
+
+                t_vac = Affine2D().rotate(theta).translate(vac_x, vac_y)
+                vac_rect.set_transform(t_vac + self.ax_map.transData)
+                self.ax_map.add_patch(vac_rect)
+
         # Plot tactile hits
         if tactile_hits:
             tx = [p[0] for p in tactile_hits]
             ty = [p[1] for p in tactile_hits]
-            self.ax_map.plot(tx, ty, "rx", markersize=8, markeredgewidth=2, label="Tactile Correction")
+            self.ax_map.plot(
+                tx,
+                ty,
+                "rx",
+                markersize=8,
+                markeredgewidth=2,
+                label="Tactile Correction",
+            )
 
         # Plot edge points
         if edge_points:
@@ -174,10 +224,32 @@ class Visualizer:
             t = Affine2D().rotate_around(0, 0, heading).translate(cx, cy)
             rect_patch.set_transform(t + self.ax_map.transData)
             self.ax_map.add_patch(rect_patch)
-        
+
+        # Plot ground truth table bounds (simulation only)
+        if ground_truth_bounds:
+            min_x, max_x, min_y, max_y = ground_truth_bounds
+            gt_rect = Rectangle(
+                (min_x, min_y),
+                max_x - min_x,
+                max_y - min_y,
+                facecolor="none",
+                edgecolor="red",
+                linewidth=2,
+                linestyle="--",
+                label="Ground Truth",
+            )
+            self.ax_map.add_patch(gt_rect)
+
         # Only call legend if there are labeled artists
-        if (poses or edge_points or rectangle or loop_constraints or tactile_hits):
-             self.ax_map.legend()
+        if (
+            poses
+            or edge_points
+            or rectangle
+            or loop_constraints
+            or tactile_hits
+            or ground_truth_bounds
+        ):
+            self.ax_map.legend()
 
         self.ax_map.set_xlabel("X (m)")
         self.ax_map.set_ylabel("Y (m)")
@@ -212,6 +284,20 @@ class Visualizer:
                 t = Affine2D().rotate_around(0, 0, heading).translate(cx, cy)
                 rect_patch.set_transform(t + self.ax_coverage.transData)
                 self.ax_coverage.add_patch(rect_patch)
+
+            # Overlay ground truth bounds
+            if ground_truth_bounds:
+                min_x, max_x, min_y, max_y = ground_truth_bounds
+                gt_rect = Rectangle(
+                    (min_x, min_y),
+                    max_x - min_x,
+                    max_y - min_y,
+                    facecolor="none",
+                    edgecolor="red",
+                    linewidth=2,
+                    linestyle="--",
+                )
+                self.ax_coverage.add_patch(gt_rect)
 
         self.ax_coverage.set_xlabel("X (m)")
         self.ax_coverage.set_ylabel("Y (m)")

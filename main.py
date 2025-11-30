@@ -354,16 +354,20 @@ class Deskinator:
             self.edge_drop_counts["right"] = 0
 
         if not self.motion.edge_event_active:
+            # During BOUNDARY_DISCOVERY, wall follower handles edge events internally
+            # We still add edge points for rectangle fitting
+            is_wall_following = self.fsm.state == RobotState.BOUNDARY_DISCOVERY
+
             if self.edge_drop_counts["left"] >= self.edge_debounce_cycles:
-                print(f"[Edge] Left edge detected")
                 self.edge_drop_counts["left"] = 0
-                self.motion.handle_edge_event("left")
+                if not is_wall_following:
+                    self.motion.handle_edge_event("left")
                 self._add_edge_points("left")
 
             if self.edge_drop_counts["right"] >= self.edge_debounce_cycles:
-                print(f"[Edge] Right edge detected")
                 self.edge_drop_counts["right"] = 0
-                self.motion.handle_edge_event("right")
+                if not is_wall_following:
+                    self.motion.handle_edge_event("right")
                 self._add_edge_points("right")
 
     def _add_edge_points(self, side: str):
@@ -464,7 +468,7 @@ class Deskinator:
             pose = self.ekf.pose()
             dt = 1.0 / ALG.FUSE_HZ
 
-            # Handle edge events if active (but let WallFollower handle edges during its phase)
+            # Handle edge events if active (but NOT during wall following - it handles edges internally)
             if (
                 self.motion.edge_event_active
                 and self.fsm.state != RobotState.BOUNDARY_DISCOVERY
@@ -553,51 +557,43 @@ class Deskinator:
                     v_cmd, omega_cmd = 0.0, 0.0
 
                 elif state == RobotState.BOUNDARY_DISCOVERY:
-                    # Use robust Wall Follower
+                    # Wall following with bump-and-correct (small 10° turns)
                     v_cmd, omega_cmd = self.wall_follower.update(
-                        pose, self.sensor_context.get("sensors", []), dt
+                        pose, self.sensor_context.get("sensors", [255, 255]), dt
                     )
 
+                    # Check if wall follower completed a lap
                     if self.wall_follower.state == WallState.DONE:
-                        print("[Main] Boundary lap complete - Closing Loop")
-                        # Close loop in Pose Graph
-                        # Find latest node
-                        if self.pose_graph.poses and self.wall_follower.lap_start_pose:
-                            last_node = max(self.pose_graph.poses.keys())
+                        print("[Main] Wall following lap complete!")
 
-                            # Find node closest to where the lap actually started (first wall contact)
-                            lap_start = self.wall_follower.lap_start_pose
-                            target_node = 0
-                            min_d = float("inf")
+                        # Disable manual loop closure - relying on rectangle fit of raw points
+                        # if self.pose_graph.poses and self.wall_follower.lap_start_pose:
+                        #    ... (disabled) ...
 
-                            for nid, npose in self.pose_graph.poses.items():
-                                # Only check nodes that existed before the lap end
-                                if nid < last_node - 10:
-                                    d = (npose[0] - lap_start[0]) ** 2 + (
-                                        npose[1] - lap_start[1]
-                                    ) ** 2
-                                    if d < min_d:
-                                        min_d = d
-                                        target_node = nid
-
-                            print(
-                                f"[Main] Closing loop: Node {last_node} -> Node {target_node} (dist {min_d**0.5:.3f}m)"
-                            )
-                            self.pose_graph.add_manual_loop_closure(
-                                last_node, target_node
-                            )
-                            self.pose_graph.optimize()
-                            print("[Main] Pose graph optimized")
-
-                            # Sync EKF with optimized graph
-                            opt_pose = self.pose_graph.poses[last_node]
-                            self.ekf.set_pose(*opt_pose)
-                            print(f"[Main] EKF synced to {opt_pose}")
-
-                        # Tell FSM we are done
+                        # Tell FSM we're done with boundary discovery
                         self.fsm.rectangle_confident = True
 
                 elif state == RobotState.COVERAGE:
+                    # Ensure lanes are generated (retry if not yet built)
+                    if not self.coverage_planner.lanes:
+                        rect = self.rect_fit.get_rectangle()
+                        if rect:
+                            print(f"[Coverage] Building lanes (retry)...")
+                            self.coverage_planner.set_rectangle(rect)
+                            lanes = self.coverage_planner.build_lanes()
+                            if lanes:
+                                print(
+                                    f"[Coverage] Generated {len(lanes)} coverage lanes"
+                                )
+                            else:
+                                print(
+                                    f"[Coverage] Warning: No lanes generated (rect too small?)"
+                                )
+                        else:
+                            print(
+                                "[Coverage] Warning: No rectangle available for lane generation"
+                            )
+
                     # Follow coverage path
                     lane = self.coverage_planner.get_current_lane()
                     if lane:
@@ -615,9 +611,11 @@ class Deskinator:
                             if self.coverage_planner.is_complete():
                                 print("[Coverage] All lanes complete")
                     else:
-                        # No more lanes available
+                        # No more lanes available - may mean coverage is complete
                         v_cmd, omega_cmd = 0.0, 0.0
                         self.motion.reset_path_progress()
+                        if self.coverage_planner.is_complete():
+                            print("[Coverage] Coverage planner reports complete")
                         if self.coverage_planner.is_complete():
                             print("[Coverage] Coverage planner reports complete")
 

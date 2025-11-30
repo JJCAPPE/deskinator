@@ -3,6 +3,7 @@ Motion controllers for boundary following and path following.
 """
 
 import numpy as np
+import random
 from typing import List, Tuple, Optional
 try:
     from ..config import LIMS, ALG, GEOM, I2C
@@ -223,6 +224,8 @@ class MotionController:
         self.edge_event_active = True
         self.edge_event_side = side
         self.edge_event_step = 0
+        # Random turn angle between 90-180 degrees for better exploration
+        self.edge_turn_angle = random.uniform(np.pi/2, np.pi)
 
     def update_edge_event(
         self, ekf_pose: Tuple[float, float, float], dt: float
@@ -263,21 +266,21 @@ class MotionController:
                 return (-LIMS.V_REV_MAX, 0.0)
 
         elif self.edge_event_step == 2:
-            # Rotate away from edge
-            rotation_angle = np.pi / 4  # 45 degrees
+            # Rotate away from edge with random angle (90-180 degrees)
+            rotation_angle = getattr(self, 'edge_turn_angle', np.pi / 2)
             if self.edge_event_side == "left":
                 rotation_angle = -rotation_angle
 
             heading_diff = wrap_angle(theta - self.rotate_start_heading)
 
-            if abs(heading_diff - rotation_angle) < 0.1:
+            if abs(wrap_angle(heading_diff - rotation_angle)) < 0.15:
                 self.edge_event_step = 3
                 self.sidestep_start_pose = ekf_pose
                 return (0.0, 0.0)
             else:
                 # Turn
                 omega_dir = 1.0 if rotation_angle > 0 else -1.0
-                return (0.0, omega_dir * LIMS.OMEGA_MAX * 0.3)
+                return (0.0, omega_dir * LIMS.OMEGA_MAX * 0.5)
 
         elif self.edge_event_step == 3:
             # Side-step along boundary

@@ -1,161 +1,222 @@
 """
-Robust Wall Following Behavior.
-Uses "bump & turn" logic to define the table boundary.
+Robust Wall Following Behavior (Simplified).
+
+Strategy: "Bang-Bang" with fixed avoidance maneuver.
+1. Drive forward with slight bias towards wall.
+2. If edge detected (sensor off table):
+   - Stop.
+   - Back up slightly (to clear overhang).
+   - Turn AWAY from edge by a FIXED angle (e.g., 30 deg) to ensure we move away.
+   - Resume driving.
+
+This avoids the "micro-turn" issue where the robot turns just enough to clear the sensor,
+then immediately drives back into the void.
 """
 
 import numpy as np
 import math
 from enum import Enum, auto
 from typing import Tuple, Optional, List
+
 try:
     from ..config import ALG, LIMS, GEOM, I2C
 except ImportError:
     from config import ALG, LIMS, GEOM, I2C
 
+
 class WallState(Enum):
-    FIND_WALL = auto()      # Driving forward to find first edge
-    BACKOFF = auto()        # Backing up after edge detect
-    TURN_ALIGN = auto()     # Turning to align with wall
-    FOLLOW = auto()         # Driving along wall
-    TURN_CORNER = auto()    # Turning 90 degrees at corner (or missed edge)
-    DONE = auto()           # Completed lap
+    FIND_WALL = auto()  # Driving forward to find first edge
+    AVOID = auto()      # Backing up and turning away from edge
+    FOLLOW = auto()     # Driving along wall with bias
+    DONE = auto()       # Completed lap
+
 
 class WallFollower:
+    """
+    Simplified Wall Follower.
+    """
+
+    # Configuration
+    BACKUP_DIST = 0.05      # m
+    BACKUP_SPEED = 0.08     # m/s
+    FIXED_TURN_ANGLE = np.deg2rad(30)  # Minimum turn to take a "bite" out of the wall
+    FOLLOW_SPEED = 0.10     # m/s
+    TURN_SPEED = 0.3        # rad/s
+    WALL_BIAS = 0.15         # rad/s - bias towards wall
+
+    MIN_LAP_DISTANCE = 6.0
+    LAP_CLOSURE_RADIUS = 0.4
+
     def __init__(self):
         self.state = WallState.FIND_WALL
-        self.start_pose = None
-        self.corner_poses = []
+
+        # Pose tracking
+        self.start_pose: Optional[Tuple[float, float, float]] = None
+        self.lap_start_pose: Optional[Tuple[float, float, float]] = None
+        self.maneuver_start_pose: Optional[Tuple[float, float, float]] = None
+        self.maneuver_start_heading: float = 0.0
+
+        # State variables
+        self.turn_direction: int = -1  # -1 = right (CW), +1 = left (CCW)
+        self.consistent_turn_direction: int = 0  # 0 = Undecided
+        self.triggering_sensor: str = "none"
+        self.avoid_step: str = "backup" # backup, turn
         
-        # Action state tracking
-        self.action_start_pose = None
-        self.action_start_heading = 0.0
-        self.target_val = 0.0
-        
-        # Follow logic
-        self.follow_direction = -1 # -1 for Left (CCW), 1 for Right (CW)
-        self.last_edge_time = 0.0
-        self.dist_since_edge = 0.0
-        self.last_dist = 0.0
-        
-        # Lap closure
-        self.lap_start_pose = None
-        self.lap_dist = 0.0
-        
-    def update(self, ekf_pose: Tuple[float, float, float], sensors: List[int], dt: float) -> Tuple[float, float]:
+        # Distance tracking
+        self.total_distance: float = 0.0
+        self.last_pose: Optional[Tuple[float, float, float]] = None
+        self.edge_count: int = 0
+
+        # Debug
+        self.corner_poses: List[Tuple[float, float, float]] = []
+
+    def reset(self):
+        self.__init__()
+
+    def update(
+        self, ekf_pose: Tuple[float, float, float], sensors: List[int], dt: float
+    ) -> Tuple[float, float]:
         """
         Update wall follower state machine.
-        
-        Args:
-            ekf_pose: (x, y, theta)
-            sensors: [left_raw, right_raw]
-            dt: time step
-            
-        Returns:
-            (v, omega) command
+        Returns: (v, omega)
         """
         x, y, theta = ekf_pose
+
+        # Track distance
+        if self.last_pose is not None:
+            dx = x - self.last_pose[0]
+            dy = y - self.last_pose[1]
+            self.total_distance += math.sqrt(dx * dx + dy * dy)
+        self.last_pose = ekf_pose
+
+        # Sensors: Low value = OFF TABLE (Edge)
+        left_raw = sensors[I2C.LEFT_SENSOR_IDX] if len(sensors) > I2C.LEFT_SENSOR_IDX else 255
+        right_raw = sensors[I2C.RIGHT_SENSOR_IDX] if len(sensors) > I2C.RIGHT_SENSOR_IDX else 255
         
-        # Sensor Check (True if OFF TABLE)
-        left_trig = sensors[I2C.LEFT_SENSOR_IDX] < ALG.EDGE_RAW_THRESH
-        right_trig = sensors[I2C.RIGHT_SENSOR_IDX] < ALG.EDGE_RAW_THRESH
-        any_trig = left_trig or right_trig
-        
+        left_off = left_raw < ALG.EDGE_RAW_THRESH
+        right_off = right_raw < ALG.EDGE_RAW_THRESH
+        any_edge = left_off or right_off
+
+        # State Machine
         if self.state == WallState.FIND_WALL:
-            # Drive forward until edge
-            if any_trig:
-                self.state = WallState.BACKOFF
-                self.action_start_pose = ekf_pose
-                self.target_val = ALG.POST_EDGE_BACKOFF
-                self.lap_start_pose = ekf_pose # Approximately start of lap
-                self.corner_poses.append(ekf_pose)
+            if self.start_pose is None:
+                self.start_pose = ekf_pose
+
+            if any_edge:
+                print(f"[WallFollow] Wall found at ({x:.2f}, {y:.2f})")
+                self.lap_start_pose = ekf_pose
+                self.edge_count += 1
+                self._decide_turn_dir(left_off, right_off)
+                self._start_avoid(ekf_pose)
                 return (0.0, 0.0)
-            return (LIMS.V_BASE * 0.5, 0.0)
             
-        elif self.state == WallState.BACKOFF:
-            # Back up fixed distance
-            dist = np.hypot(x - self.action_start_pose[0], y - self.action_start_pose[1])
-            if dist >= self.target_val:
-                # Transition to TURN
-                self.state = WallState.TURN_ALIGN
-                self.action_start_heading = theta
-                
-                # Heuristic: Short run = Correction, Long run = Corner
-                if self.last_dist < 0.4:
-                    # Correction: Turn 15 degrees away from edge
-                    # If we are following LEFT wall (CCW), edge is on Right? 
-                    # No, "Find Wall" -> Turn Right 90 -> Wall is on Left.
-                    # If we hit edge, we drifted Left. Need to Turn Right (Negative).
-                    self.target_val = -np.deg2rad(15)
-                else:
-                    # Corner: Turn 90 degrees Right
-                    self.target_val = -np.pi / 2.0
-                    self.corner_poses.append(ekf_pose)
-                
-                return (0.0, 0.0)
-                
-            return (-LIMS.V_REV_MAX, 0.0)
-            
-        elif self.state == WallState.TURN_ALIGN:
-            # Turn to target angle
-            diff = theta - self.action_start_heading
-            # Unwrap
-            diff = (diff + np.pi) % (2 * np.pi) - np.pi
-            
-            remaining = self.target_val - diff
-            
-            if abs(remaining) < 0.1:
-                self.state = WallState.FOLLOW
-                self.action_start_pose = ekf_pose
-                return (0.0, 0.0)
-                
-            omega = np.sign(remaining) * LIMS.OMEGA_MAX * 0.5
-            return (0.0, omega)
-            
+            return (self.FOLLOW_SPEED, 0.0)
+
+        elif self.state == WallState.AVOID:
+            return self._state_avoid(ekf_pose, left_off, right_off)
+
         elif self.state == WallState.FOLLOW:
-            # Drive forward
-            if any_trig:
-                # Hit edge
-                self.last_dist = np.hypot(x - self.action_start_pose[0], y - self.action_start_pose[1])
-                
-                self.state = WallState.BACKOFF
-                self.action_start_pose = ekf_pose
-                self.target_val = ALG.POST_EDGE_BACKOFF
+            if any_edge:
+                self.edge_count += 1
+                # Check if we hit the "other" wall (e.g. inside corner or drift)
+                # Update turn direction if needed
+                self._decide_turn_dir(left_off, right_off)
+                self._start_avoid(ekf_pose)
                 return (0.0, 0.0)
-            
-            # Check for Lap Closure
-            if self.check_lap_closure(ekf_pose):
+
+            # Check lap closure
+            if self._check_lap_closure(ekf_pose):
                 self.state = WallState.DONE
                 return (0.0, 0.0)
-            
-            return (LIMS.V_BASE * 0.8, 0.0)
+
+            # Drive with bias towards the wall
+            # If we turn RIGHT (CW) to avoid wall, wall is on LEFT.
+            # So we want to bias LEFT (CCW, positive).
+            # consistent_turn_direction is -1 (Right). -(-1) = +1. Correct.
+            omega = -self.consistent_turn_direction * self.WALL_BIAS
+            return (self.FOLLOW_SPEED, omega)
+
+        elif self.state == WallState.DONE:
+            return (0.0, 0.0)
 
         return (0.0, 0.0)
 
-    def check_lap_closure(self, pose):
+    def _decide_turn_dir(self, left_off, right_off):
+        """Decide which way to turn based on which sensor fell off."""
+        if self.consistent_turn_direction != 0:
+            return  # Already locked in
+
+        if left_off:
+            self.triggering_sensor = "left"
+            self.consistent_turn_direction = -1 # Turn Right (CW)
+        elif right_off:
+            self.triggering_sensor = "right"
+            self.consistent_turn_direction = 1 # Turn Left (CCW)
+        else:
+            # Both off or neither (shouldn't happen if triggered) - default to Right
+            self.consistent_turn_direction = -1
+
+
+    def _start_avoid(self, pose):
+        """Start the avoidance maneuver."""
+        self.state = WallState.AVOID
+        self.avoid_step = "backup"
+        self.maneuver_start_pose = pose
+        self.maneuver_start_heading = pose[2]
+        print(f"[WallFollow] Avoid: Backing up...")
+
+    def _state_avoid(self, pose, left_off, right_off) -> Tuple[float, float]:
+        """Execute backup -> turn sequence."""
+        x, y, theta = pose
+
+        if self.avoid_step == "backup":
+            # Check distance backed up
+            start = self.maneuver_start_pose
+            dist = math.sqrt((x - start[0])**2 + (y - start[1])**2)
+            
+            if dist >= self.BACKUP_DIST:
+                self.avoid_step = "turn"
+                self.maneuver_start_heading = theta # Reset heading for turn
+                print(f"[WallFollow] Avoid: Turning {np.rad2deg(self.FIXED_TURN_ANGLE):.0f} deg...")
+                return (0.0, 0.0)
+            
+            return (-self.BACKUP_SPEED, 0.0)
+
+        elif self.avoid_step == "turn":
+            # Turn until angle reached AND sensors clear
+            turned = abs(self._wrap_angle(theta - self.maneuver_start_heading))
+            
+            all_clear = (not left_off) and (not right_off)
+            angle_reached = turned >= self.FIXED_TURN_ANGLE
+
+            if angle_reached and all_clear:
+                print(f"[WallFollow] Avoid complete. Resuming follow.")
+                self.state = WallState.FOLLOW
+                return (0.0, 0.0)
+            
+            # Turn in the safe direction
+            return (0.0, self.consistent_turn_direction * self.TURN_SPEED)
+
+        return (0.0, 0.0)
+
+    def _check_lap_closure(self, pose) -> bool:
         if self.lap_start_pose is None:
             return False
+        if self.total_distance < self.MIN_LAP_DISTANCE:
+            return False
+        if self.edge_count < 4:
+            return False
         
-        # Don't trigger immediately at start
         dx = pose[0] - self.lap_start_pose[0]
         dy = pose[1] - self.lap_start_pose[1]
-        dist_from_start = np.hypot(dx, dy)
+        dist = math.sqrt(dx*dx + dy*dy)
         
-        # Estimate total travel
-        # Simple metric: elapsed time * speed? Or accumulation?
-        # We don't track accumulation here easily without integrating v.
-        # Use corner count or just "Time passed"
-        
-        # If we have found 4 corners, it's a rectangle.
-        # If we have found 0 corners (circle), we rely on distance?
-        
-        is_near_start = dist_from_start < 0.3
-        has_corners = len(self.corner_poses) >= 4
-        
-        # Fallback: If we have many small corrections (circle), corner_poses might be empty.
-        # But we assume "Rectangular Desk" task per user prompt ("shape of the table" usually implies finding the bounds).
-        
-        if is_near_start and has_corners:
-            return True
-            
-        return False
+        return dist < self.LAP_CLOSURE_RADIUS
 
+    @staticmethod
+    def _wrap_angle(angle: float) -> float:
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle

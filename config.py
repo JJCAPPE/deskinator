@@ -51,13 +51,13 @@ class Geometry:
     STEPS_PER_M: float = (
         1000  # calibrated from physical test: 0.33m actual / 0.0625m odometry = 5.28x correction
     )
-    SENSOR_FWD: float = 0.218500  # m; sensors lead axle +
+    SENSOR_FWD: float = 0.21655  # m; sensors lead axle +
     SENSOR_LAT: tuple[float, ...] = (
-        +0.119840,
-        -0.119840,
+        +0.11984,
+        -0.11984,
     )  # m; left and right sensor lateral positions
     VAC_WIDTH: float = 0.200  # m; effective cleaned width
-    SENSOR_TO_VAC: float = -0.79308  # m; vacuum behind sensors
+    SENSOR_TO_VAC: float = -0.07566  # m; vacuum behind sensors
 
 
 @dataclass
@@ -90,7 +90,9 @@ class Algo:
     LOOP_RADIUS: float = 0.06  # m
     SWEEP_OVERLAP: float = 0.02  # m
     GRID_RES: float = 0.02  # m (2 cm raster)
-    RECT_CONF_MIN_LEN: float = 0.6  # m of perimeter observed
+    RECT_CONF_MIN_LEN: float = (
+        2.0  # m of perimeter observed (for 2m x 2m = 8m perimeter)
+    )
     RECT_ORTHTOL_DEG: float = 8.0  # deg
     STOP_DELAY_AFTER_EDGE: float = 0.00  # s
     POST_EDGE_BACKOFF: float = 0.03  # m
