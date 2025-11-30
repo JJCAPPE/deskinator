@@ -2,6 +2,7 @@
 Visualization utilities.
 
 Provides plotting and debug visualization for SLAM and coverage.
+Optimized for real-time performance using persistent artists.
 """
 
 import numpy as np
@@ -9,7 +10,9 @@ from typing import List, Tuple, Optional
 
 try:
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Rectangle, Circle, FancyArrow
+    import matplotlib.transforms as transforms
+    from matplotlib.patches import Rectangle, Circle
+    from matplotlib.collections import LineCollection
 
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
@@ -27,6 +30,7 @@ except ImportError:
             SENSOR_FWD = 0.2185
             SENSOR_TO_VAC = -0.79308
             VAC_WIDTH = 0.2
+            SENSOR_LAT = (0.1, -0.1)
 
 
 class Visualizer:
@@ -44,11 +48,8 @@ class Visualizer:
         if not self.enabled:
             return
 
-        # Force non-interactive backend if on MacOS to avoid main thread issues?
-        # Actually, let's try standard non-blocking first.
-        # If this blocks, it might be because pyplot.show() is expected or interaction mode issues.
-
         try:
+            plt.style.use("fast")  # Use fast style if available
             plt.ion()  # Interactive mode
             self.fig, self.axes = plt.subplots(1, 2, figsize=figsize)
         except Exception as e:
@@ -56,22 +57,130 @@ class Visualizer:
             self.enabled = False
             return
 
+        # --- SLAM MAP SETUP ---
         self.ax_map = self.axes[0]
-
-        self.ax_coverage = self.axes[1]
-
         self.ax_map.set_xlabel("X (m)")
         self.ax_map.set_ylabel("Y (m)")
         self.ax_map.set_title("SLAM Map")
         self.ax_map.set_aspect("equal")
         self.ax_map.grid(True)
 
+        # Initialize Artists (Empty)
+        # Trajectory
+        (self.ln_traj,) = self.ax_map.plot(
+            [], [], "b-", linewidth=1, label="Trajectory"
+        )
+
+        # Current Pose
+        (self.ln_pose,) = self.ax_map.plot(
+            [], [], "o", color="gray", markersize=8, label="Current", zorder=5
+        )
+
+        # Heading Arrow (using a simple line for speed, or a reusable arrow patch)
+        # Arrows are hard to reuse efficiently in matplotlib, we'll redraw it or use a line
+        # Using a line for heading is much faster than creating a FancyArrow every frame
+        (self.ln_heading,) = self.ax_map.plot([], [], "k-", linewidth=2, zorder=6)
+
+        # Edges (using plot is faster than scatter for simple dots)
+        (self.ln_edges,) = self.ax_map.plot(
+            [], [], "g.", markersize=3, label="Edges", alpha=0.6
+        )
+
+        # Tactile hits
+        (self.ln_tactile,) = self.ax_map.plot(
+            [], [], "rx", markersize=8, markeredgewidth=2, label="Tactile"
+        )
+
+        # Loop constraints (LineCollection for speed)
+        self.lc_loops = LineCollection(
+            [],
+            colors="green",
+            linestyles="--",
+            linewidths=1.5,
+            alpha=0.6,
+            label="Loop Closure",
+        )
+        self.ax_map.add_collection(self.lc_loops)
+
+        # Robot Body Patches
+        self.patch_vac = Rectangle(
+            (0, 0), 0, 0, facecolor="purple", alpha=0.5, zorder=4
+        )
+        self.ax_map.add_patch(self.patch_vac)
+
+        self.sensor_circles = []
+        if hasattr(GEOM, "SENSOR_LAT"):
+            for _ in GEOM.SENSOR_LAT:
+                c = Circle(
+                    (0, 0),
+                    0.02,
+                    facecolor="red",
+                    edgecolor="black",
+                    alpha=0.8,
+                    zorder=10,
+                )
+                self.ax_map.add_patch(c)
+                self.sensor_circles.append(c)
+
+        # Boundary Rectangle
+        self.patch_boundary = Rectangle(
+            (0, 0),
+            0,
+            0,
+            facecolor="none",
+            edgecolor="orange",
+            linewidth=2,
+            label="Boundary",
+        )
+        self.ax_map.add_patch(self.patch_boundary)
+
+        # Ground Truth Rectangle
+        self.patch_ground_truth = Rectangle(
+            (0, 0),
+            0,
+            0,
+            facecolor="none",
+            edgecolor="red",
+            linewidth=2,
+            linestyle="--",
+            label="Ground Truth",
+        )
+        self.ax_map.add_patch(self.patch_ground_truth)
+
+        # Text Status
+        self.txt_status = self.ax_map.text(
+            0.02,
+            0.98,
+            "",
+            transform=self.ax_map.transAxes,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+            zorder=20,
+        )
+
+        # Legend (create once)
+        self.ax_map.legend(loc="lower left", fontsize="small")
+
+        # --- COVERAGE MAP SETUP ---
+        self.ax_coverage = self.axes[1]
         self.ax_coverage.set_xlabel("X (m)")
         self.ax_coverage.set_ylabel("Y (m)")
         self.ax_coverage.set_title("Coverage Map")
         self.ax_coverage.set_aspect("equal")
 
-        # Show the window immediately (non-blocking)
+        # Coverage Image
+        # Initialize with dummy data
+        self.img_coverage = self.ax_coverage.imshow(
+            np.zeros((10, 10)), cmap="Greens", origin="lower", alpha=0.7, vmin=0, vmax=1
+        )
+
+        # Coverage Boundary Overlay
+        self.patch_cov_boundary = Rectangle(
+            (0, 0), 0, 0, facecolor="none", edgecolor="blue", linewidth=2
+        )
+        self.ax_coverage.add_patch(self.patch_cov_boundary)
+
+        # Show window
         plt.show(block=False)
         plt.pause(0.1)
 
@@ -90,220 +199,138 @@ class Visualizer:
         tactile_hits: Optional[List[Tuple[float, float]]] = None,
         ground_truth_bounds: Optional[Tuple[float, float, float, float]] = None,
     ):
-        """
-        Update visualization.
-
-        Args:
-            poses: List of (x, y, θ) poses
-            edge_points: List of (x, y) edge detection points
-            rectangle: Rectangle (cx, cy, heading, width, height) or None
-            coverage_grid: Coverage grid array or None
-            swept_map_bounds: (min_x, max_x, min_y, max_y) or None
-            loop_constraints: List of start/end point pairs for loop closures
-            text_info: Status text to display
-            robot_state: Current robot state string
-            tactile_hits: List of (x,y) points where tactile update occurred
-            ground_truth_bounds: (min_x, max_x, min_y, max_y) for simulation ground truth table
-        """
+        """Update visualization efficiently."""
         if not self.enabled:
             return
 
-        # Clear axes
-        self.ax_map.clear()
-        self.ax_coverage.clear()
+        # 1. Update Status Text
+        self.txt_status.set_text(text_info)
 
-        # Status text
-        self.ax_map.text(
-            0.02,
-            0.98,
-            text_info,
-            transform=self.ax_map.transAxes,
-            verticalalignment="top",
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
-        )
-
-        # Plot loop constraints (SLAM connections)
-        if loop_constraints:
-            for p1, p2 in loop_constraints:
-                self.ax_map.plot(
-                    [p1[0], p2[0]], [p1[1], p2[1]], "g--", linewidth=1.5, alpha=0.6
-                )
-            # Add a dummy line for legend
-            self.ax_map.plot([], [], "g--", label="Loop Closure")
-
-        # Plot trajectory
+        # 2. Update Trajectory
         if poses:
+            # Extract x, y arrays
+            # Using numpy is faster than list comprehension if available, but lists are okay for <10k points
             xs = [p[0] for p in poses]
             ys = [p[1] for p in poses]
-            self.ax_map.plot(xs, ys, "b-", linewidth=1, label="Trajectory")
+            self.ln_traj.set_data(xs, ys)
 
-            # Current pose
-            if len(poses) > 0:
-                x, y, theta = poses[-1]
+            # Update Current Pose Marker
+            current_pose = poses[-1]
+            cx, cy, ctheta = current_pose
+            self.ln_pose.set_data([cx], [cy])
 
-                # State-based color
-                color = "gray"
-                if "BOUNDARY" in robot_state:
-                    color = "orange"
-                elif "COVERAGE" in robot_state:
-                    color = "green"
-                elif "DONE" in robot_state:
-                    color = "blue"
-                elif "ERROR" in robot_state:
-                    color = "red"
+            # Update Color based on state
+            color = "gray"
+            if "BOUNDARY" in robot_state:
+                color = "orange"
+            elif "COVERAGE" in robot_state:
+                color = "green"
+            elif "DONE" in robot_state:
+                color = "blue"
+            elif "ERROR" in robot_state:
+                color = "red"
+            self.ln_pose.set_color(color)
 
-                self.ax_map.plot(x, y, "o", color=color, markersize=8, label="Current")
+            # Update Heading Line (length 0.15m)
+            hx = cx + 0.15 * np.cos(ctheta)
+            hy = cy + 0.15 * np.sin(ctheta)
+            self.ln_heading.set_data([cx, hx], [cy, hy])
+            self.ln_heading.set_color(color)
 
-                # Heading arrow
-                dx = 0.1 * np.cos(theta)
-                dy = 0.1 * np.sin(theta)
-                self.ax_map.arrow(
-                    x, y, dx, dy, head_width=0.03, head_length=0.05, fc=color, ec=color
-                )
+            # Update Vacuum Patch (Purple Rectangle)
+            vac_offset = GEOM.SENSOR_FWD + GEOM.SENSOR_TO_VAC
+            vac_x = cx + vac_offset * np.cos(ctheta)
+            vac_y = cy + vac_offset * np.sin(ctheta)
 
-                # Vacuum position (behind robot)
-                vac_offset = GEOM.SENSOR_FWD + GEOM.SENSOR_TO_VAC
-                vac_x = x + vac_offset * np.cos(theta)
-                vac_y = y + vac_offset * np.sin(theta)
+            vac_t = transforms.Affine2D().rotate(ctheta).translate(vac_x, vac_y)
+            self.patch_vac.set_width(GEOM.VAC_WIDTH)
+            self.patch_vac.set_height(0.04)
+            self.patch_vac.set_xy(
+                (-GEOM.VAC_WIDTH / 2, -0.02)
+            )  # Center relative to transform
+            self.patch_vac.set_transform(vac_t + self.ax_map.transData)
 
-                # Draw vacuum as small rectangle
-                vac_width = GEOM.VAC_WIDTH
-                vac_rect = Rectangle(
-                    (-vac_width / 2, -0.02),
-                    vac_width,
-                    0.04,
-                    facecolor="purple",
-                    edgecolor="purple",
-                    alpha=0.5,
-                )
-                from matplotlib.transforms import Affine2D
+            # Update Sensors (Red Circles)
+            if hasattr(GEOM, "SENSOR_LAT"):
+                for i, lat_offset in enumerate(GEOM.SENSOR_LAT):
+                    if i < len(self.sensor_circles):
+                        # Calculate world position
+                        sx_world = (
+                            cx
+                            + GEOM.SENSOR_FWD * np.cos(ctheta)
+                            - lat_offset * np.sin(ctheta)
+                        )
+                        sy_world = (
+                            cy
+                            + GEOM.SENSOR_FWD * np.sin(ctheta)
+                            + lat_offset * np.cos(ctheta)
+                        )
+                        self.sensor_circles[i].center = (sx_world, sy_world)
 
-                t_vac = Affine2D().rotate(theta).translate(vac_x, vac_y)
-                vac_rect.set_transform(t_vac + self.ax_map.transData)
-                self.ax_map.add_patch(vac_rect)
-
-        # Plot tactile hits
-        if tactile_hits:
-            tx = [p[0] for p in tactile_hits]
-            ty = [p[1] for p in tactile_hits]
-            self.ax_map.plot(
-                tx,
-                ty,
-                "rx",
-                markersize=8,
-                markeredgewidth=2,
-                label="Tactile Correction",
-            )
-
-        # Plot edge points
+        # 3. Update Edges
         if edge_points:
             ex = [p[0] for p in edge_points]
             ey = [p[1] for p in edge_points]
-            self.ax_map.plot(ex, ey, "g.", markersize=3, label="Edges")
+            self.ln_edges.set_data(ex, ey)
 
-        # Plot rectangle
+        # 4. Update Tactile Hits
+        if tactile_hits:
+            tx = [p[0] for p in tactile_hits]
+            ty = [p[1] for p in tactile_hits]
+            self.ln_tactile.set_data(tx, ty)
+
+        # 5. Update Loop Constraints
+        if loop_constraints:
+            # LineCollection expects a list of segments: [(x0, y0), (x1, y1)]
+            segments = [[p1, p2] for p1, p2 in loop_constraints]
+            self.lc_loops.set_segments(segments)
+
+        # 6. Update Boundary Rectangle
         if rectangle:
             cx, cy, heading, width, height = rectangle
-
-            # Create rectangle patch
-            # Transform to axis-aligned then rotate
-            rect_patch = Rectangle(
-                (-width / 2, -height / 2),
-                width,
-                height,
-                angle=np.rad2deg(heading),
-                facecolor="none",
-                edgecolor="orange",
-                linewidth=2,
-                label="Boundary",
+            rect_t = (
+                transforms.Affine2D().rotate_around(0, 0, heading).translate(cx, cy)
             )
 
-            # Add patch at center
-            from matplotlib.transforms import Affine2D
+            self.patch_boundary.set_width(width)
+            self.patch_boundary.set_height(height)
+            self.patch_boundary.set_xy((-width / 2, -height / 2))
+            self.patch_boundary.set_transform(rect_t + self.ax_map.transData)
 
-            t = Affine2D().rotate_around(0, 0, heading).translate(cx, cy)
-            rect_patch.set_transform(t + self.ax_map.transData)
-            self.ax_map.add_patch(rect_patch)
+            # Also update the one on coverage map
+            self.patch_cov_boundary.set_width(width)
+            self.patch_cov_boundary.set_height(height)
+            self.patch_cov_boundary.set_xy((-width / 2, -height / 2))
+            self.patch_cov_boundary.set_transform(rect_t + self.ax_coverage.transData)
+        else:
+            # Hide if not confident
+            self.patch_boundary.set_width(0)
+            self.patch_cov_boundary.set_width(0)
 
-        # Plot ground truth table bounds (simulation only)
+        # 7. Update Ground Truth
         if ground_truth_bounds:
             min_x, max_x, min_y, max_y = ground_truth_bounds
-            gt_rect = Rectangle(
-                (min_x, min_y),
-                max_x - min_x,
-                max_y - min_y,
-                facecolor="none",
-                edgecolor="red",
-                linewidth=2,
-                linestyle="--",
-                label="Ground Truth",
-            )
-            self.ax_map.add_patch(gt_rect)
+            self.patch_ground_truth.set_width(max_x - min_x)
+            self.patch_ground_truth.set_height(max_y - min_y)
+            self.patch_ground_truth.set_xy((min_x, min_y))
 
-        # Only call legend if there are labeled artists
-        if (
-            poses
-            or edge_points
-            or rectangle
-            or loop_constraints
-            or tactile_hits
-            or ground_truth_bounds
-        ):
-            self.ax_map.legend()
-
-        self.ax_map.set_xlabel("X (m)")
-        self.ax_map.set_ylabel("Y (m)")
-        self.ax_map.set_title("SLAM Map")
-        self.ax_map.set_aspect("equal")
-        self.ax_map.grid(True)
-
-        # Plot coverage
+        # 8. Update Coverage Map
         if coverage_grid is not None and swept_map_bounds is not None:
             min_x, max_x, min_y, max_y = swept_map_bounds
+            self.img_coverage.set_data(coverage_grid)
+            self.img_coverage.set_extent((min_x, max_x, min_y, max_y))
+            self.img_coverage.set_clim(0, 1)  # Ensure scaling stays consistent
 
-            self.ax_coverage.imshow(
-                coverage_grid,
-                extent=[min_x, max_x, min_y, max_y],
-                origin="lower",
-                cmap="Greens",
-                alpha=0.7,
-            )
+        # 9. Dynamic Autoscaling (Optional - can be expensive so maybe do it less often)
+        # Matplotlib's relim is fast enough for lines
+        self.ax_map.relim()
+        self.ax_map.autoscale_view()
 
-            # Overlay rectangle
-            if rectangle:
-                cx, cy, heading, width, height = rectangle
-                rect_patch = Rectangle(
-                    (-width / 2, -height / 2),
-                    width,
-                    height,
-                    angle=np.rad2deg(heading),
-                    facecolor="none",
-                    edgecolor="blue",
-                    linewidth=2,
-                )
-                t = Affine2D().rotate_around(0, 0, heading).translate(cx, cy)
-                rect_patch.set_transform(t + self.ax_coverage.transData)
-                self.ax_coverage.add_patch(rect_patch)
+        self.ax_coverage.relim()
+        self.ax_coverage.autoscale_view()
 
-            # Overlay ground truth bounds
-            if ground_truth_bounds:
-                min_x, max_x, min_y, max_y = ground_truth_bounds
-                gt_rect = Rectangle(
-                    (min_x, min_y),
-                    max_x - min_x,
-                    max_y - min_y,
-                    facecolor="none",
-                    edgecolor="red",
-                    linewidth=2,
-                    linestyle="--",
-                )
-                self.ax_coverage.add_patch(gt_rect)
-
-        self.ax_coverage.set_xlabel("X (m)")
-        self.ax_coverage.set_ylabel("Y (m)")
-        self.ax_coverage.set_title("Coverage Map")
-        self.ax_coverage.set_aspect("equal")
-
+        # Render
+        # Pause is necessary for the GUI event loop to process
         plt.pause(0.001)
 
     def save(self, filename: str):

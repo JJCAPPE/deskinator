@@ -415,24 +415,40 @@ class Deskinator:
             dist = (dx * dx + dy * dy) ** 0.5
 
             if dist >= ALG.NODE_SPACING:
-                node_id = self.pose_graph.add_node(time.time(), pose)
+                # Optimization: Only add node if we are NOT performing a recovery/avoidance maneuver
+                # This prevents adding "messy" nodes when spinning in place or backing up
+                is_stable_motion = True
+                if self.fsm.state == RobotState.BOUNDARY_DISCOVERY:
+                    # In boundary mode, avoid adding nodes during the "AVOID" state of wall following
+                    if self.wall_follower.state == WallState.AVOID:
+                        is_stable_motion = False
 
-                # Add odometry edge
-                if node_id > 0:
-                    # Compute relative pose
-                    try:
-                        from .slam.frames import pose_difference
-                    except ImportError:
-                        from slam.frames import pose_difference
+                # Also check general motion controller recovery
+                if (
+                    getattr(self.motion, "recovery_active", False)
+                    or self.motion.edge_event_active
+                ):
+                    is_stable_motion = False
 
-                    z_ij = pose_difference(self.last_node_pose, pose)
+                if is_stable_motion:
+                    node_id = self.pose_graph.add_node(time.time(), pose)
 
-                    import numpy as np
+                    # Add odometry edge
+                    if node_id > 0:
+                        # Compute relative pose
+                        try:
+                            from .slam.frames import pose_difference
+                        except ImportError:
+                            from slam.frames import pose_difference
 
-                    Info = np.diag([100.0, 100.0, 50.0])
-                    self.pose_graph.add_edge_odom(node_id - 1, node_id, z_ij, Info)
+                        z_ij = pose_difference(self.last_node_pose, pose)
 
-                self.last_node_pose = pose
+                        import numpy as np
+
+                        Info = np.diag([100.0, 100.0, 50.0])
+                        self.pose_graph.add_edge_odom(node_id - 1, node_id, z_ij, Info)
+
+                    self.last_node_pose = pose
 
             # Optimize periodically
             optimize_counter += 1

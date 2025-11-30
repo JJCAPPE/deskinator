@@ -96,7 +96,11 @@ class RectangleFit:
     def _compute_bbox_area(self, points, angle):
         """Compute bounding box area for a given rotation."""
         c, s = np.cos(angle), np.sin(angle)
-        R = np.array([[c, -s], [s, c]])
+        # Rotation matrix to align points with axes
+        # To rotate points by -angle (to align with X-axis), we use:
+        # [ cos  sin]
+        # [-sin  cos]
+        R = np.array([[c, s], [-s, c]])
         
         # Rotate points
         rotated = points @ R.T
@@ -108,13 +112,16 @@ class RectangleFit:
         height = max_y - min_y
         area = width * height
         
-        # Center in original frame
-        center_x_rot = (min_x + max_x) / 2
-        center_y_rot = (min_y + max_y) / 2
+        # Center in aligned frame
+        center_x_aligned = (min_x + max_x) / 2
+        center_y_aligned = (min_y + max_y) / 2
         
-        # Rotate center back
-        center_x = center_x_rot * c - center_y_rot * s
-        center_y = center_x_rot * s + center_y_rot * c
+        # Rotate center back to world frame
+        # Inverse rotation is transpose (angle)
+        # [ cos -sin]
+        # [ sin  cos]
+        center_x = center_x_aligned * c - center_y_aligned * s
+        center_y = center_x_aligned * s + center_y_aligned * c
         
         return area, (center_x, center_y, angle, width, height)
 

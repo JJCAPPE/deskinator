@@ -130,9 +130,14 @@ class WallFollower:
                 return (0.0, 0.0)
 
             # Drive with bias towards the wall
-            # If we turn RIGHT (CW) to avoid wall, wall is on LEFT.
-            # So we want to bias LEFT (CCW, positive).
-            # consistent_turn_direction is -1 (Right). -(-1) = +1. Correct.
+            # If we turn RIGHT (CW, -1) to avoid wall, wall is on LEFT.
+            # To bias TOWARDS the wall (Left), we need positive omega.
+            # omega = -(-1) * bias = +bias. Correct.
+            
+            # If we turn LEFT (CCW, +1) to avoid wall, wall is on RIGHT.
+            # To bias TOWARDS the wall (Right), we need negative omega.
+            # omega = -(+1) * bias = -bias. Correct.
+            
             omega = -self.consistent_turn_direction * self.WALL_BIAS
             return (self.FOLLOW_SPEED, omega)
 
