@@ -51,19 +51,30 @@ class Visualizer:
         try:
             plt.style.use("fast")  # Use fast style if available
             plt.ion()  # Interactive mode
-            self.fig, self.axes = plt.subplots(1, 2, figsize=figsize)
+            self.fig, self.ax_map = plt.subplots(1, 1, figsize=figsize)
         except Exception as e:
             print(f"[Viz] Error initializing matplotlib: {e}")
             self.enabled = False
             return
 
-        # --- SLAM MAP SETUP ---
-        self.ax_map = self.axes[0]
+        # --- COMBINED MAP SETUP ---
         self.ax_map.set_xlabel("X (m)")
         self.ax_map.set_ylabel("Y (m)")
-        self.ax_map.set_title("SLAM Map")
+        self.ax_map.set_title("SLAM & Coverage Map")
         self.ax_map.set_aspect("equal")
         self.ax_map.grid(True)
+
+        # Coverage Image (overlaid on main map, behind other elements)
+        # Initialize with dummy data
+        self.img_coverage = self.ax_map.imshow(
+            np.zeros((10, 10)),
+            cmap="Greens",
+            origin="lower",
+            alpha=0.5,
+            vmin=0,
+            vmax=1,
+            zorder=0,
+        )
 
         # Initialize Artists (Empty)
         # Trajectory
@@ -167,25 +178,6 @@ class Visualizer:
 
         # Legend (create once)
         self.ax_map.legend(loc="lower left", fontsize="small")
-
-        # --- COVERAGE MAP SETUP ---
-        self.ax_coverage = self.axes[1]
-        self.ax_coverage.set_xlabel("X (m)")
-        self.ax_coverage.set_ylabel("Y (m)")
-        self.ax_coverage.set_title("Coverage Map")
-        self.ax_coverage.set_aspect("equal")
-
-        # Coverage Image
-        # Initialize with dummy data
-        self.img_coverage = self.ax_coverage.imshow(
-            np.zeros((10, 10)), cmap="Greens", origin="lower", alpha=0.7, vmin=0, vmax=1
-        )
-
-        # Coverage Boundary Overlay
-        self.patch_cov_boundary = Rectangle(
-            (0, 0), 0, 0, facecolor="none", edgecolor="blue", linewidth=2
-        )
-        self.ax_coverage.add_patch(self.patch_cov_boundary)
 
         # Show window
         plt.show(block=False)
@@ -338,16 +330,9 @@ class Visualizer:
             self.patch_boundary.set_height(height)
             self.patch_boundary.set_xy((-width / 2, -height / 2))
             self.patch_boundary.set_transform(rect_t + self.ax_map.transData)
-
-            # Also update the one on coverage map
-            self.patch_cov_boundary.set_width(width)
-            self.patch_cov_boundary.set_height(height)
-            self.patch_cov_boundary.set_xy((-width / 2, -height / 2))
-            self.patch_cov_boundary.set_transform(rect_t + self.ax_coverage.transData)
         else:
             # Hide if not confident
             self.patch_boundary.set_width(0)
-            self.patch_cov_boundary.set_width(0)
 
         # 7. Update Ground Truth
         if ground_truth_bounds:
@@ -363,13 +348,18 @@ class Visualizer:
             self.img_coverage.set_extent((min_x, max_x, min_y, max_y))
             self.img_coverage.set_clim(0, 1)  # Ensure scaling stays consistent
 
-        # 9. Dynamic Autoscaling (Optional - can be expensive so maybe do it less often)
-        # Matplotlib's relim is fast enough for lines
-        self.ax_map.relim()
-        self.ax_map.autoscale_view()
-
-        self.ax_coverage.relim()
-        self.ax_coverage.autoscale_view()
+        # 9. Dynamic Autoscaling with margin
+        # If we have ground truth bounds (table bounds), use them with margin
+        # Otherwise use automatic scaling
+        if ground_truth_bounds:
+            min_x, max_x, min_y, max_y = ground_truth_bounds
+            margin = 0.5  # 0.5m margin on all sides
+            self.ax_map.set_xlim(min_x - margin, max_x + margin)
+            self.ax_map.set_ylim(min_y - margin, max_y + margin)
+        else:
+            # Fallback to automatic scaling
+            self.ax_map.relim()
+            self.ax_map.autoscale_view()
 
         # Render
         # Pause is necessary for the GUI event loop to process

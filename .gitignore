@@ -40,4 +40,5 @@ Thumbs.db
 
 # Logs
 logs/
-output_map.png
+viz_demo_output
+output_map

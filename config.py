@@ -66,7 +66,7 @@ class Limits:
 
     V_BASE: float = 0.15  # m/s
     V_MAX: float = 0.2  # m/s
-    OMEGA_MAX: float = 1.0  # rad/s
+    OMEGA_MAX: float = 0.5  # rad/s
     A_MAX: float = 0.60  # m/s^2
     ALPHA_MAX: float = 4.0  # rad/s^2
     J_MAX: float = 4.0  # m/s^3
@@ -89,7 +89,7 @@ class Algo:
     NODE_SPACING: float = 0.05  # m
     LOOP_RADIUS: float = 0.06  # m
     SWEEP_OVERLAP: float = 0.02  # m
-    GRID_RES: float = 0.02  # m (2 cm raster)
+    GRID_RES: float = 0.01  # m (2 cm raster)
     RECT_CONF_MIN_LEN: float = (
         2.0  # m of perimeter observed (for 2m x 2m = 8m perimeter)
     )
