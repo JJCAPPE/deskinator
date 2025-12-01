@@ -9,6 +9,7 @@ import time
 import signal
 import sys
 from typing import List, Tuple
+import numpy as np
 
 try:
     from .config import PINS, I2C, GEOM, LIMS, ALG
@@ -610,28 +611,55 @@ class Deskinator:
                                 "[Coverage] Warning: No rectangle available for lane generation"
                             )
 
-                    # Follow coverage path
-                    lane = self.coverage_planner.get_current_lane()
-                    if lane:
-                        v_cmd, omega_cmd = self.motion.cmd_follow_path(
-                            pose, lane, self.swept_map
-                        )
-
-                        # Check if current lane is complete
-                        if self.motion.is_path_complete():
-                            # Advance to next waypoint (which may advance to next lane)
-                            self.coverage_planner.advance_waypoint()
-                            self.motion.reset_path_progress()
-
-                            # Check if all lanes are complete
-                            if self.coverage_planner.is_complete():
-                                print("[Coverage] All lanes complete")
+                    # Follow coverage path with orientation-aware waypoints
+                    waypoint = self.coverage_planner.get_current_waypoint()
+                    if waypoint:
+                        wx, wy, wtheta = waypoint
+                        x, y, theta = pose
+                        
+                        # Check if position reached
+                        dx = wx - x
+                        dy = wy - y
+                        dist_to_waypoint = np.sqrt(dx*dx + dy*dy)
+                        POSITION_TOLERANCE = 0.05  # 5cm
+                        
+                        # Check if orientation reached
+                        dtheta = wtheta - theta
+                        # Normalize to [-pi, pi]
+                        dtheta = ((dtheta + np.pi) % (2*np.pi)) - np.pi
+                        ORIENTATION_TOLERANCE = np.deg2rad(5)  # 5 degrees
+                        
+                        if dist_to_waypoint < POSITION_TOLERANCE:
+                            # Position reached, check orientation
+                            if abs(dtheta) < ORIENTATION_TOLERANCE:
+                                # Both position and orientation reached, advance waypoint
+                                self.coverage_planner.advance_waypoint()
+                                if self.coverage_planner.is_complete():
+                                    print("[Coverage] All lanes complete")
+                                v_cmd, omega_cmd = 0.0, 0.0
+                            else:
+                                # Turn in place to reach desired orientation (proportional control)
+                                turn_gain = 1.5  # Proportional gain
+                                omega_cmd = turn_gain * dtheta  # Proportional control (smoother)
+                                omega_cmd = np.clip(omega_cmd, -1.0, 1.0)  # Limit turn rate
+                                v_cmd = 0.0  # No forward motion during turn
+                        else:
+                            # Position not reached, move forward
+                            # Follow the desired orientation from the waypoint
+                            # This ensures we follow lane direction when in lanes,
+                            # and transition direction when moving between lanes
+                            heading_error = dtheta
+                            
+                            # Forward speed
+                            forward_speed = 0.1  # m/s
+                            v_cmd = forward_speed
+                            
+                            # Angular velocity to correct heading toward desired orientation
+                            omega_cmd = 2.0 * heading_error  # Proportional control
+                            omega_cmd = np.clip(omega_cmd, -1.0, 1.0)  # Limit turn rate
                     else:
-                        # No more lanes available - may mean coverage is complete
+                        # No more waypoints available
                         v_cmd, omega_cmd = 0.0, 0.0
-                        self.motion.reset_path_progress()
-                        if self.coverage_planner.is_complete():
-                            print("[Coverage] Coverage planner reports complete")
                         if self.coverage_planner.is_complete():
                             print("[Coverage] Coverage planner reports complete")
 

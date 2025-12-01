@@ -227,7 +227,7 @@ def simulate_wall_following(speed_multiplier: float = SPEED_MULTIPLIER):
 
     # Simulation parameters
     dt = 0.05  # 20 Hz
-    max_time = 120.0  # seconds
+    max_time = 70.0  # seconds
     t = 0.0
 
     print("\nStarting simulation...")
@@ -364,10 +364,16 @@ def simulate_coverage(
     # Create visualizer
     viz = Visualizer(figsize=(14, 8))
 
-    # Reset robot to start of first lane
+    # Reset robot to start of first lane with correct orientation
     if lanes:
-        start_waypoint = lanes[0][0]
-        robot.pose = np.array([start_waypoint[0], start_waypoint[1], 0.0])
+        first_waypoint_data = planner.get_current_waypoint()
+        if first_waypoint_data:
+            wx, wy, wtheta = first_waypoint_data
+            robot.pose = np.array([wx, wy, wtheta])  # Start with correct orientation
+        else:
+            # Fallback: use lane start point
+            start_waypoint = lanes[0][0]
+            robot.pose = np.array([start_waypoint[0], start_waypoint[1], 0.0])
         robot.trajectory = [tuple(robot.pose)]
 
     # Simple pure pursuit controller
@@ -437,45 +443,86 @@ def simulate_coverage(
             -1.0
         )  # Track when we last advanced to prevent rapid advances
 
+        # Check if robot starts at first waypoint - if so, advance if oriented correctly
+        initial_pose = robot.get_pose()
+        first_waypoint = planner.get_current_waypoint()
+        if first_waypoint:
+            wx, wy, wtheta = first_waypoint
+            dx = wx - initial_pose[0]
+            dy = wy - initial_pose[1]
+            dist = np.sqrt(dx * dx + dy * dy)
+            dtheta = wtheta - initial_pose[2]
+            dtheta = ((dtheta + np.pi) % (2 * np.pi)) - np.pi
+            if dist < 0.1 and abs(dtheta) < np.deg2rad(
+                15
+            ):  # Close in position and roughly oriented
+                print(f"[Coverage] Starting at waypoint, advancing if needed...")
+                # Will be handled in main loop
+
         while t < max_time and not planner.is_complete():
             pose = robot.get_pose()
 
             # Get current waypoint
-            current_lane = planner.get_current_lane()
-            if not current_lane:
+            waypoint_data = planner.get_current_waypoint()
+            if not waypoint_data:
                 break
 
-            waypoint = current_lane[planner.current_waypoint_idx]
+            wx, wy, wtheta = waypoint_data
+            waypoint = (wx, wy)
 
-            # Control
-            v, omega = pure_pursuit(pose, waypoint)
-
-            # Check if waypoint reached
+            # Compute distance and orientation error
             dx = waypoint[0] - pose[0]
             dy = waypoint[1] - pose[1]
             dist = np.sqrt(dx * dx + dy * dy)
 
-            # Advance waypoint if close enough, but prevent rapid advances (at least 0.1s between advances)
-            # This prevents getting stuck when waypoints overlap (e.g., end of lane 0 = start of lane 1)
-            if dist < 0.05 and (t - last_advance_time) > 0.1:
+            dtheta = wtheta - pose[2]
+            dtheta = ((dtheta + np.pi) % (2 * np.pi)) - np.pi
+            abs_dtheta = abs(dtheta)
+
+            POSITION_TOLERANCE = 0.05  # 5cm
+            ORIENTATION_TOLERANCE = np.deg2rad(8)  # 8 degrees
+
+            # Check if waypoint reached (position and orientation)
+            position_reached = dist < POSITION_TOLERANCE
+            orientation_reached = abs_dtheta < ORIENTATION_TOLERANCE
+
+            # Advance waypoint if both position and orientation are reached
+            if (
+                position_reached
+                and orientation_reached
+                and (t - last_advance_time) > 0.1
+            ):
                 planner.advance_waypoint()
                 last_advance_time = t
+                # Skip control update this iteration since we advanced
+                continue
 
-                # After advancing, if the new waypoint is also very close (overlapping waypoints),
-                # skip it immediately but only once per advance
-                new_lane = planner.get_current_lane()
-                if new_lane and planner.current_waypoint_idx < len(new_lane):
-                    new_waypoint = new_lane[planner.current_waypoint_idx]
-                    new_dx = new_waypoint[0] - pose[0]
-                    new_dy = new_waypoint[1] - pose[1]
-                    new_dist = np.sqrt(new_dx * new_dx + new_dy * new_dy)
+            # Control logic: prioritize orientation when close to waypoint
+            if position_reached:
+                # At waypoint position - turn in place to match orientation
+                if not orientation_reached:
+                    v = 0.0  # Stop forward motion
+                    omega = 1.5 * dtheta  # Turn in place (smooth)
+                    omega = np.clip(omega, -1.5, 1.5)
+                else:
+                    # Both reached but not advanced yet (shouldn't happen, but safe)
+                    v = 0.0
+                    omega = 0.0
+            elif dist < 0.15:  # Approaching waypoint - start considering orientation
+                # Blend between pure pursuit and orientation correction
+                v_pp, omega_pp = pure_pursuit(pose, waypoint)
 
-                    # Skip overlapping waypoints (common in boustrophedon when lanes share endpoints)
-                    if (
-                        new_dist < 0.05
-                        and planner.current_waypoint_idx < len(new_lane) - 1
-                    ):
-                        planner.advance_waypoint()
+                # Reduce forward speed if orientation error is large
+                orientation_factor = max(0.3, 1.0 - abs_dtheta / np.deg2rad(45))
+                v = v_pp * orientation_factor
+
+                # Blend angular velocities: pure pursuit + orientation correction
+                omega_orient = 1.0 * dtheta  # Orientation correction
+                omega = 0.5 * omega_pp + 0.5 * omega_orient
+                omega = np.clip(omega, -1.5, 1.5)
+            else:
+                # Far from waypoint - use pure pursuit
+                v, omega = pure_pursuit(pose, waypoint)
 
             # Update robot
             robot.update(v, omega, dt)
@@ -494,9 +541,17 @@ def simulate_coverage(
                     swept_map.max_y,
                 )
 
+                # Get current lane index
+                current_lane_idx = planner.get_current_lane_index()
+                if current_lane_idx is None:
+                    current_lane_idx = 0
+                else:
+                    current_lane_idx += 1  # 1-indexed for display
+
                 status = f"Coverage Mode\n"
                 status += f"Time: {t:.1f}s\n"
-                status += f"Lane: {planner.current_lane_idx + 1}/{len(lanes)}\n"
+                status += f"Waypoint: {planner.current_waypoint_idx + 1}/{len(planner.path)}\n"
+                status += f"Lane: {current_lane_idx}/{len(lanes)}\n"
                 status += f"Coverage: {swept_map.coverage_ratio(rectangle):.1%}"
 
                 viz.update(

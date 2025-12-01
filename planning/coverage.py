@@ -778,13 +778,16 @@ class CoveragePlanner:
     """
     Boustrophedon path planner for coverage.
 
-    Generates alternating lanes inside a rectangle.
+    Generates alternating lanes inside a rectangle with in-place turns between lanes.
+    Waypoints are (x, y, theta) tuples where theta is the desired orientation.
     """
 
     def __init__(self):
         self.rectangle: Optional[Tuple[float, float, float, float, float]] = None
-        self.lanes: List[List[Tuple[float, float]]] = []
-        self.current_lane_idx = 0
+        self.lanes: List[List[Tuple[float, float]]] = []  # Original lane definitions
+        self.path: List[Tuple[float, float, float]] = (
+            []
+        )  # Complete path with orientations
         self.current_waypoint_idx = 0
 
     def set_rectangle(self, rect: Tuple[float, float, float, float, float]):
@@ -863,32 +866,157 @@ class CoveragePlanner:
             lanes.append(lane)
 
         self.lanes = lanes
-        self.current_lane_idx = 0
+
+        # Build complete path with orientations and transitions
+        self.path = self._build_path_with_transitions(
+            lanes, heading, inner_width > inner_height
+        )
         self.current_waypoint_idx = 0
 
         return lanes
 
+    def _build_path_with_transitions(
+        self,
+        lanes: List[List[Tuple[float, float]]],
+        rectangle_heading: float,
+        lanes_vertical: bool,
+    ) -> List[Tuple[float, float, float]]:
+        """
+        Build complete path with orientations and in-place turns between lanes.
+
+        Args:
+            lanes: List of lanes, each lane is [(x1, y1), (x2, y2)]
+            rectangle_heading: Heading of the rectangle
+            lanes_vertical: True if lanes are vertical (along height), False if horizontal
+
+        Returns:
+            List of waypoints as (x, y, theta) tuples
+        """
+        path = []
+
+        if not lanes:
+            return path
+
+        for i, lane in enumerate(lanes):
+            start_pt = lane[0]
+            end_pt = lane[1]
+
+            # Compute lane direction vector
+            dx = end_pt[0] - start_pt[0]
+            dy = end_pt[1] - start_pt[1]
+            lane_heading = np.arctan2(dy, dx)
+
+            # Start of lane: add waypoint with correct orientation
+            path.append((start_pt[0], start_pt[1], lane_heading))
+
+            # End of lane: add waypoint with same orientation (still pointing along lane)
+            path.append((end_pt[0], end_pt[1], lane_heading))
+
+            # If not the last lane, add transition waypoints
+            if i < len(lanes) - 1:
+                next_lane = lanes[i + 1]
+                next_start = next_lane[0]
+
+                # Compute heading to face next lane start
+                dx_to_next = next_start[0] - end_pt[0]
+                dy_to_next = next_start[1] - end_pt[1]
+                heading_to_next = np.arctan2(dy_to_next, dx_to_next)
+
+                # Turn in place at end of current lane to face next lane start
+                path.append((end_pt[0], end_pt[1], heading_to_next))
+
+                # Move to start of next lane (with same heading)
+                path.append((next_start[0], next_start[1], heading_to_next))
+
+                # Compute next lane direction
+                next_end = next_lane[1]
+                next_dx = next_end[0] - next_start[0]
+                next_dy = next_end[1] - next_start[1]
+                next_lane_heading = np.arctan2(next_dy, next_dx)
+
+                # Turn in place at start of next lane to face lane direction
+                path.append((next_start[0], next_start[1], next_lane_heading))
+
+        return path
+
     def get_current_lane(self) -> Optional[List[Tuple[float, float]]]:
-        """Get current lane waypoints."""
-        if not self.lanes or self.current_lane_idx >= len(self.lanes):
+        """
+        Get current waypoint for path following.
+        Returns the next waypoint in the path as a single-point list for compatibility.
+        """
+        if not self.path or self.current_waypoint_idx >= len(self.path):
             return None
-        return self.lanes[self.current_lane_idx]
+
+        # Return current waypoint as a single-point path for compatibility
+        waypoint = self.path[self.current_waypoint_idx]
+        return [(waypoint[0], waypoint[1])]
+
+    def get_current_waypoint(self) -> Optional[Tuple[float, float, float]]:
+        """Get current waypoint with orientation."""
+        if not self.path or self.current_waypoint_idx >= len(self.path):
+            return None
+        return self.path[self.current_waypoint_idx]
 
     def advance_waypoint(self):
-        """Advance to next waypoint or lane."""
-        if not self.lanes:
+        """Advance to next waypoint in the path."""
+        if not self.path:
             return
 
-        current_lane = self.lanes[self.current_lane_idx]
-        if self.current_waypoint_idx < len(current_lane) - 1:
+        if self.current_waypoint_idx < len(self.path) - 1:
             self.current_waypoint_idx += 1
+
+    def get_current_lane_index(self) -> Optional[int]:
+        """
+        Get the current lane index based on waypoint index.
+        Returns the lane we're currently working on.
+        """
+        if not self.path or not self.lanes:
+            return None
+
+        # Each lane has 2 waypoints (start, end)
+        # Transitions between lanes add 3 waypoints (turn at end, move to next, turn at start)
+        # Pattern: [lane0_start(0), lane0_end(1), turn_end(2), move_to_lane1(3), turn_start_lane1(4), lane1_start(5), lane1_end(6), ...]
+
+        idx = self.current_waypoint_idx
+        waypoints_per_lane = 2
+        transition_waypoints = 3
+        cycle_length = (
+            waypoints_per_lane + transition_waypoints
+        )  # 5 waypoints per cycle after first lane
+
+        # First lane: indices 0-1
+        if idx < waypoints_per_lane:
+            return 0
+
+        # After first lane, pattern repeats every 5 waypoints
+        # Lane 1 cycle: indices 2-6 (transition 2-4, lane 1: 5-6)
+        # Lane 2 cycle: indices 7-11 (transition 7-9, lane 2: 10-11)
+
+        # Subtract first lane waypoints
+        remaining = idx - waypoints_per_lane
+
+        # Which cycle are we in? (0-indexed, so cycle 0 = lane 1, cycle 1 = lane 2, etc.)
+        cycle = remaining // cycle_length
+
+        # Position within cycle (0-4)
+        pos_in_cycle = remaining % cycle_length
+
+        # Determine lane: if we're past the transition midpoint, we're working on the next lane
+        if (
+            pos_in_cycle >= transition_waypoints - 1
+        ):  # At or past "move to next lane" waypoint
+            lane_idx = cycle + 1  # Next lane
         else:
-            # Move to next lane
-            self.current_lane_idx += 1
-            self.current_waypoint_idx = 0
+            lane_idx = cycle  # Still on previous lane (transitioning from it)
+
+        # Clamp to valid range
+        if lane_idx >= len(self.lanes):
+            return len(self.lanes) - 1
+
+        return lane_idx
 
     def is_complete(self) -> bool:
-        """Check if all lanes are complete."""
-        if not self.lanes:
+        """Check if all waypoints are complete."""
+        if not self.path:
             return False
-        return self.current_lane_idx >= len(self.lanes)
+        return self.current_waypoint_idx >= len(self.path)
