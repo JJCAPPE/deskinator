@@ -712,6 +712,11 @@ class Deskinator:
                     state_str = self.fsm.get_state().name
                     status_text = f"Mode: {state_str}\nCoverage: {cov_ratio:.1%}"
 
+                    # Get coverage lanes for visualization
+                    coverage_lanes = (
+                        self.coverage_planner.lanes if self.coverage_planner.lanes else None
+                    )
+
                     self.visualizer.update(
                         poses,
                         edge_points,
@@ -722,6 +727,7 @@ class Deskinator:
                         text_info=status_text,
                         robot_state=state_str,
                         tactile_hits=self.tactile_hits,
+                        coverage_lanes=coverage_lanes,
                     )
 
             last_v, last_omega = v_limited, omega_limited

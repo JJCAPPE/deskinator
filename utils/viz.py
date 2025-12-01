@@ -113,6 +113,17 @@ class Visualizer:
         )
         self.ax_map.add_collection(self.lc_loops)
 
+        # Coverage lanes (LineCollection for speed)
+        self.lc_lanes = LineCollection(
+            [],
+            colors="blue",
+            linestyles="-",
+            linewidths=1.0,
+            alpha=0.4,
+            label="Coverage Lanes",
+        )
+        self.ax_map.add_collection(self.lc_lanes)
+
         # Robot Body Patches
         self.patch_robot = Rectangle(
             (0, 0),
@@ -197,6 +208,7 @@ class Visualizer:
         robot_state: str = "IDLE",
         tactile_hits: Optional[List[Tuple[float, float]]] = None,
         ground_truth_bounds: Optional[Tuple[float, float, float, float]] = None,
+        coverage_lanes: Optional[List[List[Tuple[float, float]]]] = None,
     ):
         """Update visualization efficiently."""
         if not self.enabled:
@@ -318,6 +330,20 @@ class Visualizer:
             # LineCollection expects a list of segments: [(x0, y0), (x1, y1)]
             segments = [[p1, p2] for p1, p2 in loop_constraints]
             self.lc_loops.set_segments(segments)
+        else:
+            self.lc_loops.set_segments([])
+
+        # 5.5. Update Coverage Lanes
+        if coverage_lanes:
+            # Convert lanes to segments: each lane is a list of waypoints
+            # Create segments between consecutive waypoints in each lane
+            segments = []
+            for lane in coverage_lanes:
+                for i in range(len(lane) - 1):
+                    segments.append([lane[i], lane[i + 1]])
+            self.lc_lanes.set_segments(segments)
+        else:
+            self.lc_lanes.set_segments([])
 
         # 6. Update Boundary Rectangle
         if rectangle:

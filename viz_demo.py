@@ -513,6 +513,7 @@ def simulate_coverage(
                         table.min_y,
                         table.max_y,
                     ),
+                    coverage_lanes=lanes,
                 )
 
             t += dt
