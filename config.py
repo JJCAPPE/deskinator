@@ -94,6 +94,9 @@ class Algo:
         2.0  # m of perimeter observed (for 2m x 2m = 8m perimeter)
     )
     RECT_ORTHTOL_DEG: float = 8.0  # deg
+    RECT_INSET: float = (
+        0.05  # m (inset boundary to account for sensor overshoot/radius)
+    )
     STOP_DELAY_AFTER_EDGE: float = 0.00  # s
     POST_EDGE_BACKOFF: float = 0.03  # m
     POST_EDGE_SIDE_STEP: float = 0.05  # m

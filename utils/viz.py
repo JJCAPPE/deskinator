@@ -103,10 +103,17 @@ class Visualizer:
         self.ax_map.add_collection(self.lc_loops)
 
         # Robot Body Patches
-        self.patch_vac = Rectangle(
-            (0, 0), 0, 0, facecolor="purple", alpha=0.5, zorder=4
+        self.patch_robot = Rectangle(
+            (0, 0),
+            0,
+            0,
+            facecolor="purple",
+            edgecolor="darkviolet",
+            linewidth=1.5,
+            alpha=0.7,
+            zorder=5,
         )
-        self.ax_map.add_patch(self.patch_vac)
+        self.ax_map.add_patch(self.patch_robot)
 
         self.sensor_circles = []
         if hasattr(GEOM, "SENSOR_LAT"):
@@ -237,18 +244,47 @@ class Visualizer:
             self.ln_heading.set_data([cx, hx], [cy, hy])
             self.ln_heading.set_color(color)
 
-            # Update Vacuum Patch (Purple Rectangle)
-            vac_offset = GEOM.SENSOR_FWD + GEOM.SENSOR_TO_VAC
-            vac_x = cx + vac_offset * np.cos(ctheta)
-            vac_y = cy + vac_offset * np.sin(ctheta)
+            # Update Robot Body Patch (Purple Rectangle)
+            # Robot dimensions: 220mm length x 200mm width
+            ROBOT_LENGTH = 0.220  # 220mm in meters (forward/backward)
+            ROBOT_WIDTH = 0.200  # 200mm in meters (left/right)
 
-            vac_t = transforms.Affine2D().rotate(ctheta).translate(vac_x, vac_y)
-            self.patch_vac.set_width(GEOM.VAC_WIDTH)
-            self.patch_vac.set_height(0.04)
-            self.patch_vac.set_xy(
-                (-GEOM.VAC_WIDTH / 2, -0.02)
+            # Offset: 42mm BEHIND the sensor line
+            # Sensor line is at GEOM.SENSOR_FWD (typically ~0.218m)
+            # Box starts at SENSOR_FWD - 0.042
+            # But the box is defined by center or corner.
+
+            # Let's assume SENSOR_FWD is the front of the robot for "sensor line" context
+            # If "start 42mm behind sensor line" means the FRONT of the box is 42mm behind sensors:
+            box_front_x_robot = GEOM.SENSOR_FWD - 0.042
+            box_center_x_robot = box_front_x_robot - (ROBOT_LENGTH / 2)
+
+            # Center robot at pose position + offset
+            # Rotate offset vector
+            offset_x = box_center_x_robot * np.cos(ctheta)
+            offset_y = box_center_x_robot * np.sin(ctheta)
+
+            box_center_x_world = cx + offset_x
+            box_center_y_world = cy + offset_y
+
+            robot_t = (
+                transforms.Affine2D()
+                .rotate(ctheta)
+                .translate(box_center_x_world, box_center_y_world)
+            )
+            self.patch_robot.set_width(
+                ROBOT_LENGTH
+            )  # Actually usually width is y-axis in local frame, length x-axis
+            # Wait, Matplotlib Rectangle (0,0) width height is (x, y)
+            # So width=ROBOT_LENGTH (x-axis size), height=ROBOT_WIDTH (y-axis size)
+            self.patch_robot.set_width(ROBOT_LENGTH)
+            self.patch_robot.set_height(ROBOT_WIDTH)
+            self.patch_robot.set_xy(
+                (-ROBOT_LENGTH / 2, -ROBOT_WIDTH / 2)
             )  # Center relative to transform
-            self.patch_vac.set_transform(vac_t + self.ax_map.transData)
+            self.patch_robot.set_transform(robot_t + self.ax_map.transData)
+            # Ensure visibility
+            self.patch_robot.set_visible(True)
 
             # Update Sensors (Red Circles)
             if hasattr(GEOM, "SENSOR_LAT"):
@@ -266,6 +302,12 @@ class Visualizer:
                             + lat_offset * np.cos(ctheta)
                         )
                         self.sensor_circles[i].center = (sx_world, sy_world)
+                        self.sensor_circles[i].set_visible(True)
+        else:
+            # Hide robot when no poses
+            self.patch_robot.set_visible(False)
+            for c in self.sensor_circles:
+                c.set_visible(False)
 
         # 3. Update Edges
         if edge_points:

@@ -1,16 +1,15 @@
 """
 Robust Wall Following Behavior (Simplified).
 
-Strategy: "Bang-Bang" with fixed avoidance maneuver.
+Strategy: "Turn-Until-Clear" with margin.
 1. Drive forward with slight bias towards wall.
 2. If edge detected (sensor off table):
-   - Stop.
-   - Back up slightly (to clear overhang).
-   - Turn AWAY from edge by a FIXED angle (e.g., 30 deg) to ensure we move away.
+   - Stop immediately.
+   - Turn AWAY from edge until ALL sensors are back on the table.
+   - Continue turning for a small EXTRA angle (safety margin).
    - Resume driving.
 
-This avoids the "micro-turn" issue where the robot turns just enough to clear the sensor,
-then immediately drives back into the void.
+This produces a tight "stitching" motion along the edge without backing up.
 """
 
 import numpy as np
@@ -26,9 +25,9 @@ except ImportError:
 
 class WallState(Enum):
     FIND_WALL = auto()  # Driving forward to find first edge
-    AVOID = auto()      # Backing up and turning away from edge
-    FOLLOW = auto()     # Driving along wall with bias
-    DONE = auto()       # Completed lap
+    AVOID = auto()  # Turning in place until clear
+    FOLLOW = auto()  # Driving along wall with bias
+    DONE = auto()  # Completed lap
 
 
 class WallFollower:
@@ -37,12 +36,10 @@ class WallFollower:
     """
 
     # Configuration
-    BACKUP_DIST = 0.05      # m
-    BACKUP_SPEED = 0.08     # m/s
-    FIXED_TURN_ANGLE = np.deg2rad(30)  # Minimum turn to take a "bite" out of the wall
-    FOLLOW_SPEED = 0.10     # m/s
-    TURN_SPEED = 0.3        # rad/s
-    WALL_BIAS = 0.15         # rad/s - bias towards wall
+    EXTRA_TURN_ANGLE = np.deg2rad(5)  # Extra turn after sensors clear
+    FOLLOW_SPEED = 0.10  # m/s
+    TURN_SPEED = 0.3  # rad/s
+    WALL_BIAS = 0.15  # rad/s - bias towards wall
 
     MIN_LAP_DISTANCE = 6.0
     LAP_CLOSURE_RADIUS = 0.4
@@ -53,15 +50,16 @@ class WallFollower:
         # Pose tracking
         self.start_pose: Optional[Tuple[float, float, float]] = None
         self.lap_start_pose: Optional[Tuple[float, float, float]] = None
-        self.maneuver_start_pose: Optional[Tuple[float, float, float]] = None
-        self.maneuver_start_heading: float = 0.0
 
         # State variables
         self.turn_direction: int = -1  # -1 = right (CW), +1 = left (CCW)
         self.consistent_turn_direction: int = 0  # 0 = Undecided
         self.triggering_sensor: str = "none"
-        self.avoid_step: str = "backup" # backup, turn
-        
+
+        # Avoidance state tracking
+        self.sensors_cleared: bool = False
+        self.heading_at_clear: float = 0.0
+
         # Distance tracking
         self.total_distance: float = 0.0
         self.last_pose: Optional[Tuple[float, float, float]] = None
@@ -90,9 +88,15 @@ class WallFollower:
         self.last_pose = ekf_pose
 
         # Sensors: Low value = OFF TABLE (Edge)
-        left_raw = sensors[I2C.LEFT_SENSOR_IDX] if len(sensors) > I2C.LEFT_SENSOR_IDX else 255
-        right_raw = sensors[I2C.RIGHT_SENSOR_IDX] if len(sensors) > I2C.RIGHT_SENSOR_IDX else 255
-        
+        left_raw = (
+            sensors[I2C.LEFT_SENSOR_IDX] if len(sensors) > I2C.LEFT_SENSOR_IDX else 255
+        )
+        right_raw = (
+            sensors[I2C.RIGHT_SENSOR_IDX]
+            if len(sensors) > I2C.RIGHT_SENSOR_IDX
+            else 255
+        )
+
         left_off = left_raw < ALG.EDGE_RAW_THRESH
         right_off = right_raw < ALG.EDGE_RAW_THRESH
         any_edge = left_off or right_off
@@ -109,7 +113,7 @@ class WallFollower:
                 self._decide_turn_dir(left_off, right_off)
                 self._start_avoid(ekf_pose)
                 return (0.0, 0.0)
-            
+
             return (self.FOLLOW_SPEED, 0.0)
 
         elif self.state == WallState.AVOID:
@@ -133,11 +137,11 @@ class WallFollower:
             # If we turn RIGHT (CW, -1) to avoid wall, wall is on LEFT.
             # To bias TOWARDS the wall (Left), we need positive omega.
             # omega = -(-1) * bias = +bias. Correct.
-            
+
             # If we turn LEFT (CCW, +1) to avoid wall, wall is on RIGHT.
             # To bias TOWARDS the wall (Right), we need negative omega.
             # omega = -(+1) * bias = -bias. Correct.
-            
+
             omega = -self.consistent_turn_direction * self.WALL_BIAS
             return (self.FOLLOW_SPEED, omega)
 
@@ -153,56 +157,50 @@ class WallFollower:
 
         if left_off:
             self.triggering_sensor = "left"
-            self.consistent_turn_direction = -1 # Turn Right (CW)
+            self.consistent_turn_direction = -1  # Turn Right (CW)
         elif right_off:
             self.triggering_sensor = "right"
-            self.consistent_turn_direction = 1 # Turn Left (CCW)
+            self.consistent_turn_direction = 1  # Turn Left (CCW)
         else:
             # Both off or neither (shouldn't happen if triggered) - default to Right
             self.consistent_turn_direction = -1
 
-
     def _start_avoid(self, pose):
         """Start the avoidance maneuver."""
         self.state = WallState.AVOID
-        self.avoid_step = "backup"
-        self.maneuver_start_pose = pose
-        self.maneuver_start_heading = pose[2]
-        print(f"[WallFollow] Avoid: Backing up...")
+        self.sensors_cleared = False
+        self.heading_at_clear = 0.0
+        print(f"[WallFollow] Edge! Turning {self.consistent_turn_direction}...")
 
     def _state_avoid(self, pose, left_off, right_off) -> Tuple[float, float]:
-        """Execute backup -> turn sequence."""
+        """Execute turn until clear sequence."""
         x, y, theta = pose
 
-        if self.avoid_step == "backup":
-            # Check distance backed up
-            start = self.maneuver_start_pose
-            dist = math.sqrt((x - start[0])**2 + (y - start[1])**2)
-            
-            if dist >= self.BACKUP_DIST:
-                self.avoid_step = "turn"
-                self.maneuver_start_heading = theta # Reset heading for turn
-                print(f"[WallFollow] Avoid: Turning {np.rad2deg(self.FIXED_TURN_ANGLE):.0f} deg...")
-                return (0.0, 0.0)
-            
-            return (-self.BACKUP_SPEED, 0.0)
+        # Check if ALL sensors are on the table
+        all_on_table = (not left_off) and (not right_off)
 
-        elif self.avoid_step == "turn":
-            # Turn until angle reached AND sensors clear
-            turned = abs(self._wrap_angle(theta - self.maneuver_start_heading))
-            
-            all_clear = (not left_off) and (not right_off)
-            angle_reached = turned >= self.FIXED_TURN_ANGLE
+        if not self.sensors_cleared:
+            if all_on_table:
+                self.sensors_cleared = True
+                self.heading_at_clear = theta
+                print(
+                    f"[WallFollow] Sensors clear. Adding {np.rad2deg(self.EXTRA_TURN_ANGLE):.1f} deg margin..."
+                )
 
-            if angle_reached and all_clear:
-                print(f"[WallFollow] Avoid complete. Resuming follow.")
-                self.state = WallState.FOLLOW
-                return (0.0, 0.0)
-            
             # Turn in the safe direction
             return (0.0, self.consistent_turn_direction * self.TURN_SPEED)
 
-        return (0.0, 0.0)
+        else:
+            # Sensors have cleared, perform extra turn
+            turned_extra = abs(self._wrap_angle(theta - self.heading_at_clear))
+
+            if turned_extra >= self.EXTRA_TURN_ANGLE:
+                print(f"[WallFollow] Turn complete. Resuming follow.")
+                self.state = WallState.FOLLOW
+                return (0.0, 0.0)
+
+            # Continue turning
+            return (0.0, self.consistent_turn_direction * self.TURN_SPEED)
 
     def _check_lap_closure(self, pose) -> bool:
         if self.lap_start_pose is None:
@@ -211,11 +209,11 @@ class WallFollower:
             return False
         if self.edge_count < 4:
             return False
-        
+
         dx = pose[0] - self.lap_start_pose[0]
         dy = pose[1] - self.lap_start_pose[1]
-        dist = math.sqrt(dx*dx + dy*dy)
-        
+        dist = math.sqrt(dx * dx + dy * dy)
+
         return dist < self.LAP_CLOSURE_RADIUS
 
     @staticmethod

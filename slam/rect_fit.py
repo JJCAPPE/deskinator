@@ -128,12 +128,22 @@ class RectangleFit:
     def get_rectangle(self) -> Optional[Tuple[float, float, float, float, float]]:
         """
         Get fitted rectangle if confident.
+        
+        Applies a safety inset (ALG.RECT_INSET) to the raw bounding box
+        to ensure the boundary is within the edge points (which represent off-table locations).
 
         Returns:
             (center_x, center_y, heading, width, height) or None
         """
-        if self.is_confident:
-            return self.rectangle
+        if self.is_confident and self.rectangle:
+            cx, cy, heading, w, h = self.rectangle
+            
+            # Apply inset
+            inset = getattr(ALG, "RECT_INSET", 0.0)
+            w_safe = max(0.1, w - 2 * inset)
+            h_safe = max(0.1, h - 2 * inset)
+            
+            return (cx, cy, heading, w_safe, h_safe)
         return None
 
     def get_corners(self) -> Optional[List[Tuple[float, float]]]:
@@ -143,10 +153,11 @@ class RectangleFit:
         Returns:
             List of (x, y) corner points or None
         """
-        if not self.is_confident or not self.rectangle:
+        rect = self.get_rectangle()
+        if not rect:
             return None
 
-        cx, cy, heading, width, height = self.rectangle
+        cx, cy, heading, width, height = rect
 
         # Corners in rectangle frame
         corners_local = [
