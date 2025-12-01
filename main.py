@@ -589,6 +589,15 @@ class Deskinator:
                         #    ... (disabled) ...
 
                         # Tell FSM we're done with boundary discovery
+                        # Force a fit update
+                        self.rect_fit.fit()
+                        
+                        if not self.rect_fit.is_confident:
+                            print("[Main] Warning: Wall following done but rectangle not confident. Forcing confidence.")
+                            # Force confidence if we have enough points, or just trust the wall follower
+                            if len(self.rect_fit.edge_points) > 4:
+                                self.rect_fit.is_confident = True
+                                
                         self.fsm.rectangle_confident = True
 
                 elif state == RobotState.COVERAGE:
@@ -731,6 +740,7 @@ class Deskinator:
                         text_info=status_text,
                         robot_state=state_str,
                         tactile_hits=self.tactile_hits,
+                        current_pose=pose,
                     )
 
             last_v, last_omega = v_limited, omega_limited

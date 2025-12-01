@@ -224,6 +224,7 @@ class Visualizer:
         robot_state: str = "IDLE",
         tactile_hits: Optional[List[Tuple[float, float]]] = None,
         ground_truth_bounds: Optional[Tuple[float, float, float, float]] = None,
+        current_pose: Optional[Tuple[float, float, float]] = None,
         planned_lanes: Optional[List[List[Tuple[float, float]]]] = None,
     ):
         """Update visualization efficiently."""
@@ -234,16 +235,23 @@ class Visualizer:
         self.txt_status.set_text(text_info)
 
         # 2. Update Trajectory
-        if poses:
+        if poses or current_pose:
             # Extract x, y arrays
             # Using numpy is faster than list comprehension if available, but lists are okay for <10k points
-            xs = [p[0] for p in poses]
-            ys = [p[1] for p in poses]
-            self.ln_traj.set_data(xs, ys)
+            if poses:
+                xs = [p[0] for p in poses]
+                ys = [p[1] for p in poses]
+                self.ln_traj.set_data(xs, ys)
 
             # Update Current Pose Marker
-            current_pose = poses[-1]
-            cx, cy, ctheta = current_pose
+            # Use current_pose if available (smoother), otherwise last graph pose
+            if current_pose:
+                cx, cy, ctheta = current_pose
+            elif poses:
+                cx, cy, ctheta = poses[-1]
+            else:
+                return # No pose to draw
+
             self.ln_pose.set_data([cx], [cy])
 
             # Update Color based on state
