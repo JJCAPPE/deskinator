@@ -102,6 +102,18 @@ class Visualizer:
         )
         self.ax_map.add_collection(self.lc_loops)
 
+        # Coverage Lanes (LineCollection)
+        self.lc_lanes = LineCollection(
+            [],
+            colors="cyan",
+            linestyles="-",
+            linewidths=1.0,
+            alpha=0.5,
+            label="Planned Lanes",
+            zorder=3,
+        )
+        self.ax_map.add_collection(self.lc_lanes)
+
         # Robot Body Patches
         self.patch_robot = Rectangle(
             (0, 0),
@@ -166,7 +178,14 @@ class Visualizer:
         )
 
         # Legend (create once)
-        self.ax_map.legend(loc="lower left", fontsize="small")
+        # Place legend outside (above) so it doesn't hide map details
+        self.ax_map.legend(
+            loc="lower left",
+            bbox_to_anchor=(0.0, 1.01),
+            ncol=4,
+            fontsize="small",
+            borderaxespad=0,
+        )
 
         # --- COVERAGE MAP SETUP ---
         self.ax_coverage = self.axes[1]
@@ -205,6 +224,7 @@ class Visualizer:
         robot_state: str = "IDLE",
         tactile_hits: Optional[List[Tuple[float, float]]] = None,
         ground_truth_bounds: Optional[Tuple[float, float, float, float]] = None,
+        planned_lanes: Optional[List[List[Tuple[float, float]]]] = None,
     ):
         """Update visualization efficiently."""
         if not self.enabled:
@@ -349,6 +369,23 @@ class Visualizer:
             self.patch_boundary.set_width(0)
             self.patch_cov_boundary.set_width(0)
 
+        # Update Planned Lanes
+        if planned_lanes:
+            # Convert list of point lists to list of segments or just plot lines
+            # LineCollection takes list of segments. Each lane is a sequence of points.
+            # We can draw each lane as a separate line.
+            # Flatten lanes into segments for LineCollection
+            segments = []
+            for lane in planned_lanes:
+                # Each lane is [(x1, y1), (x2, y2), ...]
+                if len(lane) > 1:
+                    # Convert points to segments: (p1, p2), (p2, p3)...
+                    lane_segments = list(zip(lane[:-1], lane[1:]))
+                    segments.extend(lane_segments)
+            self.lc_lanes.set_segments(segments)
+        else:
+            self.lc_lanes.set_segments([])
+
         # 7. Update Ground Truth
         if ground_truth_bounds:
             min_x, max_x, min_y, max_y = ground_truth_bounds
@@ -435,3 +472,105 @@ def plot_trajectory_offline(
     plt.close(fig)
 
     print(f"[Viz] Saved trajectory to {filename}")
+
+
+def plot_coverage_plan(
+    rectangle: Tuple[float, float, float, float, float],
+    lanes: List[List[Tuple[float, float]]],
+    filename: Optional[str] = None,
+):
+    """
+    Plot coverage plan with direction indicators.
+
+    Args:
+        rectangle: (cx, cy, heading, width, height)
+        lanes: List of lanes (list of points)
+        filename: Optional filename to save plot
+    """
+    if not MATPLOTLIB_AVAILABLE:
+        print("Matplotlib not available, skipping coverage plot")
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+
+    # 1. Plot Rectangle
+    cx, cy, heading, width, height = rectangle
+
+    # Plot boundary
+    rect_patch = Rectangle(
+        (0, 0),
+        width,
+        height,
+        facecolor="none",
+        edgecolor="orange",
+        linewidth=2,
+        label="Boundary",
+    )
+
+    t = transforms.Affine2D().rotate_around(0, 0, heading).translate(cx, cy)
+
+    rect_patch.set_xy((-width / 2, -height / 2))
+    rect_patch.set_transform(t + ax.transData)
+    ax.add_patch(rect_patch)
+
+    # 2. Plot Lanes
+    if lanes:
+        # Plot all segments
+        for i, lane in enumerate(lanes):
+            xs = [p[0] for p in lane]
+            ys = [p[1] for p in lane]
+            ax.plot(xs, ys, "c-", linewidth=1, alpha=0.7)
+
+            # Add arrow at end of lane to show direction
+            if len(lane) >= 2:
+                p_end = lane[-1]
+                p_prev = lane[-2]
+                dx = p_end[0] - p_prev[0]
+                dy = p_end[1] - p_prev[1]
+
+                # Normalize
+                length = (dx**2 + dy**2) ** 0.5
+                if length > 0:
+                    dx /= length
+                    dy /= length
+
+                ax.arrow(
+                    p_end[0] - dx * 0.1,
+                    p_end[1] - dy * 0.1,  # Start a bit back
+                    dx * 0.1,
+                    dy * 0.1,
+                    head_width=0.05,
+                    head_length=0.05,
+                    fc="blue",
+                    ec="blue",
+                )
+
+        # Plot Start/End
+        start_lane = lanes[0]
+        end_lane = lanes[-1]
+        if start_lane:
+            ax.plot(
+                start_lane[0][0], start_lane[0][1], "go", markersize=10, label="Start"
+            )
+        if end_lane:
+            ax.plot(end_lane[-1][0], end_lane[-1][1], "ro", markersize=10, label="End")
+
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.set_title("Coverage Plan")
+    ax.set_aspect("equal")
+    ax.grid(True)
+    ax.legend()
+
+    # Auto-scale to fit
+    ax.relim()
+    ax.autoscale_view()
+    # Ensure a margin around the rectangle
+    ax.margins(0.1)
+
+    if filename:
+        fig.savefig(filename, dpi=150, bbox_inches="tight")
+        print(f"[Viz] Saved coverage plan to {filename}")
+        plt.close(fig)
+    else:
+        plt.show(block=True)

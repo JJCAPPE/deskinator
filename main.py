@@ -170,7 +170,9 @@ class Deskinator:
         }
         self.tactile_hits = []  # Track where we bumped walls for viz
         self.last_progress_time = time.time()
+        self.last_progress_time = time.time()
         self.last_recovery_time = 0.0
+        self.last_swept_pose = None  # Track last pose for continuous coverage
 
         # Timers
         self.sense_timer = LoopTimer("Sense")
@@ -650,10 +652,17 @@ class Deskinator:
 
             now = time.time()
 
-            # Update swept map (only for forward motion)
+            # Update swept map (continuous trajectory)
+            if self.last_swept_pose is None:
+                self.last_swept_pose = pose
+            
+            # Only update if we moved enough to matter (optimization)
+            # But add_trajectory_sweep handles small moves gracefully
+            self.swept_map.add_trajectory_sweep(self.last_swept_pose, pose)
+            self.last_swept_pose = pose
+
+            # Update progress watchdog
             if v_limited > 0:
-                ds = v_limited * dt
-                self.swept_map.add_forward_sweep(pose, ds)
                 self.last_progress_time = now
             elif abs(omega_limited) > 0.4:
                 self.last_progress_time = now

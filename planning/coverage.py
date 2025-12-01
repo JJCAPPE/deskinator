@@ -6,6 +6,7 @@ Generates boustrophedon (lawn-mower) paths for cleaning coverage.
 
 import numpy as np
 from typing import List, Tuple, Optional
+
 try:
     from ..config import ALG, GEOM, LIMS
     from ..slam.frames import rotation_matrix
@@ -148,9 +149,9 @@ class CoveragePlanner:
         """Advance to next waypoint, moving to next lane if current lane is complete."""
         if not self.lanes or self.current_lane_idx >= len(self.lanes):
             return
-        
+
         self.current_waypoint_idx += 1
-        
+
         # Check if we've completed the current lane
         current_lane = self.lanes[self.current_lane_idx]
         if self.current_waypoint_idx >= len(current_lane):

@@ -102,9 +102,83 @@ class SweptMap:
                     if 0 <= gi < self.height and 0 <= gj < self.width:
                         self.grid[gi, gj] = 1
 
+    def add_trajectory_sweep(
+        self,
+        pose_start: Tuple[float, float, float],
+        pose_end: Tuple[float, float, float],
+    ):
+        """
+        Mark area as swept by interpolating between two poses.
+
+        Args:
+            pose_start: Starting pose (x, y, θ)
+            pose_end: Ending pose (x, y, θ)
+        """
+        x1, y1, theta1 = pose_start
+        x2, y2, theta2 = pose_end
+
+        # Calculate distance
+        dx = x2 - x1
+        dy = y2 - y1
+        dist = (dx * dx + dy * dy) ** 0.5
+
+        # Calculate angle difference (shortest path)
+        dtheta = theta2 - theta1
+        # Normalize to -pi..pi
+        while dtheta > np.pi:
+            dtheta -= 2 * np.pi
+        while dtheta < -np.pi:
+            dtheta += 2 * np.pi
+
+        # If movement is negligible, skip
+        if dist < 0.001 and abs(dtheta) < 0.001:
+            return
+
+        # Expand grid if needed
+        self._expand_if_needed(x1, y1)
+        self._expand_if_needed(x2, y2)
+
+        # Vacuum params
+        vac_offset = GEOM.SENSOR_FWD + GEOM.SENSOR_TO_VAC
+        vac_width = GEOM.VAC_WIDTH
+
+        # Determine number of steps
+        # We want steps small enough so vacuum width covers gaps
+        # Step size ~ resolution / 2
+        step_size = self.resolution / 2.0
+        
+        # Steps for translation
+        n_trans = int(dist / step_size)
+        
+        # Steps for rotation (arc length at vacuum offset)
+        # Arc length ~ |dtheta| * |vac_offset|
+        arc_len = abs(dtheta * vac_offset)
+        n_rot = int(arc_len / step_size)
+        
+        n_steps = max(1, n_trans, n_rot)
+
+        for k in range(n_steps + 1):
+            t = k / n_steps
+            
+            # Interpolate pose
+            x = x1 + t * dx
+            y = y1 + t * dy
+            theta = theta1 + t * dtheta
+            
+            # Vacuum center position
+            vac_x = x + vac_offset * np.cos(theta)
+            vac_y = y + vac_offset * np.sin(theta)
+
+            # Mark rectangular footprint
+            # Use a small length for the "brush" at this instant
+            # effectively drawing a thick line
+            self._mark_rectangle(vac_x, vac_y, theta, vac_width, step_size)
+
     def add_forward_sweep(self, pose: Tuple[float, float, float], ds: float):
         """
         Mark area as swept during forward motion.
+        
+        DEPRECATED: Use add_trajectory_sweep instead for better accuracy.
 
         Args:
             pose: Robot pose (x, y, θ)
@@ -114,32 +188,12 @@ class SweptMap:
             return  # Only count forward motion
 
         x, y, theta = pose
-
-        # Expand grid if needed
-        self._expand_if_needed(x, y)
-
-        # Compute vacuum footprint
-        # Vacuum is at SENSOR_FWD + SENSOR_TO_VAC ahead of axle
-        vac_offset = GEOM.SENSOR_FWD + GEOM.SENSOR_TO_VAC
-        vac_width = GEOM.VAC_WIDTH
-
-        # Sample along the path
-        n_samples = max(1, int(ds / (self.resolution / 2)))
-
-        for k in range(n_samples + 1):
-            frac = k / max(1, n_samples)
-            s = frac * ds
-
-            # Robot position at this point
-            x_s = x + s * np.cos(theta)
-            y_s = y + s * np.sin(theta)
-
-            # Vacuum center position
-            vac_x = x_s + vac_offset * np.cos(theta)
-            vac_y = y_s + vac_offset * np.sin(theta)
-
-            # Mark rectangular footprint
-            self._mark_rectangle(vac_x, vac_y, theta, vac_width, ds / n_samples)
+        
+        # Calculate end pose assuming straight line motion
+        x_end = x + ds * np.cos(theta)
+        y_end = y + ds * np.sin(theta)
+        
+        self.add_trajectory_sweep(pose, (x_end, y_end, theta))
 
     def _mark_rectangle(
         self, cx: float, cy: float, theta: float, width: float, length: float
