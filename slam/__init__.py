@@ -1,1 +1,2 @@
-"""SLAM (Simultaneous Localization and Mapping) modules."""
+"""SLAM modules."""
+
