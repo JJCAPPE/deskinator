@@ -89,7 +89,7 @@ class Algo:
     NODE_SPACING: float = 0.05  # m
     LOOP_RADIUS: float = 0.06  # m
     SWEEP_OVERLAP: float = 0.02  # m
-    GRID_RES: float = 0.01  # m (2 cm raster)
+    GRID_RES: float = 0.02  # m (2 cm raster)
     RECT_CONF_MIN_LEN: float = (
         2.0  # m of perimeter observed (for 2m x 2m = 8m perimeter)
     )
