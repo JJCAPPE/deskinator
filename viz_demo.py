@@ -187,11 +187,17 @@ class TableSimulator:
         return (self.center[0], self.center[1], self.heading, self.width, self.height)
 
 
-def simulate_wall_following(speed_multiplier: float = SPEED_MULTIPLIER):
+def simulate_wall_following(
+    speed_multiplier: float = SPEED_MULTIPLIER,
+    viz: Optional[Visualizer] = None,
+    swept_map: Optional[SweptMap] = None,
+):
     """Simulate wall-following algorithm.
 
     Args:
         speed_multiplier: Multiplier for all speeds (default: SPEED_MULTIPLIER)
+        viz: Optional Visualizer instance to reuse (creates new if None)
+        swept_map: Optional SweptMap instance to reuse (creates new if None)
     """
     print("=" * 60)
     print("Wall-Following Simulation")
@@ -222,15 +228,21 @@ def simulate_wall_following(speed_multiplier: float = SPEED_MULTIPLIER):
     # Create rectangle fitter
     rect_fit = SimpleRectangleFit()
 
-    # Create visualizer
-    viz = Visualizer(figsize=(14, 8))
+    # Create or reuse visualizer
+    if viz is None:
+        viz = Visualizer(figsize=(14, 8))
+
+    # Create or reuse swept map
+    if swept_map is None:
+        swept_map = SweptMap()
 
     # Simulation parameters
     dt = 0.05  # 20 Hz
-    max_time = 70.0  # seconds
+    max_time = 300.0  # Safety timeout (5 minutes) - should not be reached with rotation-based completion
     t = 0.0
 
     print("\nStarting simulation...")
+    print("Boundary discovery will complete after 360° of total rotation")
     print("Press Ctrl+C to stop early")
 
     try:
@@ -244,6 +256,10 @@ def simulate_wall_following(speed_multiplier: float = SPEED_MULTIPLIER):
 
             # Update robot
             robot.update(v, omega, dt)
+
+            # Update swept map during boundary search (track swept area)
+            if v > 0:
+                swept_map.add_forward_sweep(pose, v * dt)
 
             # Add edge points to rectangle fitter
             edge_points = wall_follower.get_edge_points()
@@ -265,12 +281,23 @@ def simulate_wall_following(speed_multiplier: float = SPEED_MULTIPLIER):
                 rectangle = rect_fit.get_rectangle()
                 ground_truth = table.get_ground_truth_rect()
 
-                # Create dummy coverage grid
-                coverage_grid = None
-                bounds = None
+                # Get coverage grid from swept map
+                coverage_grid = swept_map.get_grid()
+                bounds = (
+                    swept_map.min_x,
+                    swept_map.max_x,
+                    swept_map.min_y,
+                    swept_map.max_y,
+                )
+
+                total_rotation_deg = wall_follower.get_total_rotation_degrees()
+                rotation_progress = min(100.0, (total_rotation_deg / 360.0) * 100.0)
 
                 status = f"State: {wall_follower.state.value}\n"
                 status += f"Time: {t:.1f}s\n"
+                status += (
+                    f"Rotation: {total_rotation_deg:.1f}° ({rotation_progress:.1f}%)\n"
+                )
                 status += f"Edge points: {len(edge_points_list)}\n"
                 if rectangle:
                     status += f"Rectangle: {rectangle[3]:.2f} x {rectangle[4]:.2f} m"
@@ -293,7 +320,11 @@ def simulate_wall_following(speed_multiplier: float = SPEED_MULTIPLIER):
 
             t += dt
 
+        total_rotation_deg = wall_follower.get_total_rotation_degrees()
         print(f"\nWall-following complete after {t:.1f} seconds")
+        print(
+            f"Total rotation: {total_rotation_deg:.1f}° ({total_rotation_deg/360.0*100:.1f}% of full loop)"
+        )
         print(f"Collected {len(rect_fit.edge_points)} edge points")
 
         # Final rectangle fit
@@ -308,12 +339,19 @@ def simulate_wall_following(speed_multiplier: float = SPEED_MULTIPLIER):
             print("Failed to fit rectangle")
 
         # Final visualization update
+        coverage_grid = swept_map.get_grid()
+        bounds = (
+            swept_map.min_x,
+            swept_map.max_x,
+            swept_map.min_y,
+            swept_map.max_y,
+        )
         viz.update(
             poses=robot.trajectory,
             edge_points=rect_fit.edge_points,
             rectangle=rectangle,
-            coverage_grid=None,
-            swept_map_bounds=None,
+            coverage_grid=coverage_grid,
+            swept_map_bounds=bounds,
             text_info=f"Complete!\nEdge points: {len(rect_fit.edge_points)}\nRectangle fitted: {rectangle is not None}",
             robot_state="COMPLETE",
             ground_truth_bounds=(table.min_x, table.max_x, table.min_y, table.max_y),
@@ -322,15 +360,20 @@ def simulate_wall_following(speed_multiplier: float = SPEED_MULTIPLIER):
         # Wait a bit to see final state
         time.sleep(2.0)
 
-        return robot, wall_follower, rect_fit, table
+        return robot, wall_follower, rect_fit, table, viz, swept_map
 
     except KeyboardInterrupt:
         print("\nSimulation interrupted by user")
-        return robot, wall_follower, rect_fit, table
+        return robot, wall_follower, rect_fit, table, viz, swept_map
 
 
 def simulate_coverage(
-    robot, rect_fit, table, speed_multiplier: float = SPEED_MULTIPLIER
+    robot,
+    rect_fit,
+    table,
+    speed_multiplier: float = SPEED_MULTIPLIER,
+    viz: Optional[Visualizer] = None,
+    swept_map: Optional[SweptMap] = None,
 ):
     """Simulate coverage phase with boustrophedon paths.
 
@@ -339,6 +382,8 @@ def simulate_coverage(
         rect_fit: Rectangle fitter instance
         table: Table simulator instance
         speed_multiplier: Multiplier for all speeds (default: SPEED_MULTIPLIER)
+        viz: Optional Visualizer instance to reuse (creates new if None)
+        swept_map: Optional SweptMap instance to reuse (creates new if None)
     """
     print("\n" + "=" * 60)
     print("Coverage Simulation")
@@ -358,11 +403,13 @@ def simulate_coverage(
 
     print(f"Generated {len(lanes)} coverage lanes")
 
-    # Create swept map
-    swept_map = SweptMap()
+    # Reuse or create swept map
+    if swept_map is None:
+        swept_map = SweptMap()
 
-    # Create visualizer
-    viz = Visualizer(figsize=(14, 8))
+    # Reuse or create visualizer
+    if viz is None:
+        viz = Visualizer(figsize=(14, 8))
 
     # Reset robot to start of first lane with correct orientation
     if lanes:
@@ -433,10 +480,11 @@ def simulate_coverage(
 
     # Simulation parameters
     dt = 0.05
-    max_time = 180.0
+    max_time = 600.0  # Large safety timeout (10 minutes) - should not be reached
     t = 0.0
 
     print("\nStarting coverage simulation...")
+    print(f"Total waypoints in path: {len(planner.path)}")
 
     try:
         last_advance_time = (
@@ -459,7 +507,8 @@ def simulate_coverage(
                 print(f"[Coverage] Starting at waypoint, advancing if needed...")
                 # Will be handled in main loop
 
-        while t < max_time and not planner.is_complete():
+        # Continue until path is complete (with safety timeout)
+        while not planner.is_complete() and t < max_time:
             pose = robot.get_pose()
 
             # Get current waypoint
@@ -494,6 +543,12 @@ def simulate_coverage(
             ):
                 planner.advance_waypoint()
                 last_advance_time = t
+
+                # Check if we've completed all waypoints
+                if planner.is_complete():
+                    print(f"\n✓ Reached final waypoint! Path complete.")
+                    break
+
                 # Skip control update this iteration since we advanced
                 continue
 
@@ -554,6 +609,9 @@ def simulate_coverage(
                 status += f"Lane: {current_lane_idx}/{len(lanes)}\n"
                 status += f"Coverage: {swept_map.coverage_ratio(rectangle):.1%}"
 
+                # Get inset rectangle for coverage area visualization
+                coverage_area_rect = planner.get_inset_rectangle()
+
                 viz.update(
                     poses=robot.trajectory,
                     edge_points=rect_fit.edge_points,
@@ -569,13 +627,26 @@ def simulate_coverage(
                         table.max_y,
                     ),
                     coverage_lanes=lanes,
+                    coverage_area_rect=coverage_area_rect,
                 )
 
             t += dt
 
-        print(f"\nCoverage complete after {t:.1f} seconds")
+        # Check completion reason
+        if planner.is_complete():
+            print(f"\n✓ Coverage path completed successfully after {t:.1f} seconds")
+            print(f"  Completed all {len(planner.path)} waypoints")
+        else:
+            print(f"\n⚠ Coverage simulation stopped after {t:.1f} seconds (timeout)")
+            print(
+                f"  Completed {planner.current_waypoint_idx}/{len(planner.path)} waypoints"
+            )
+
         coverage_ratio = swept_map.coverage_ratio(rectangle)
         print(f"Coverage ratio: {coverage_ratio:.1%}")
+
+        # Get inset rectangle for coverage area visualization
+        coverage_area_rect = planner.get_inset_rectangle()
 
         # Final visualization
         viz.update(
@@ -592,6 +663,7 @@ def simulate_coverage(
             text_info=f"Complete!\nCoverage: {coverage_ratio:.1%}",
             robot_state="DONE",
             ground_truth_bounds=(table.min_x, table.max_x, table.min_y, table.max_y),
+            coverage_area_rect=coverage_area_rect,
         )
 
         # Wait to see final state
@@ -625,12 +697,20 @@ def main(speed_multiplier: float = SPEED_MULTIPLIER):
         print(f"\nSpeed multiplier: {speed_multiplier}x")
     print("\n" + "=" * 60)
 
+    # Create shared visualizer and swept map for both phases
+    viz = Visualizer(figsize=(14, 8))
+    swept_map = SweptMap()
+
     # Phase 1: Wall following
-    robot, wall_follower, rect_fit, table = simulate_wall_following(speed_multiplier)
+    robot, wall_follower, rect_fit, table, _, _ = simulate_wall_following(
+        speed_multiplier, viz=viz, swept_map=swept_map
+    )
 
     # Phase 2: Coverage
     if rect_fit.get_rectangle():
-        simulate_coverage(robot, rect_fit, table, speed_multiplier)
+        simulate_coverage(
+            robot, rect_fit, table, speed_multiplier, viz=viz, swept_map=swept_map
+        )
     else:
         print("\nSkipping coverage - no rectangle fitted")
 

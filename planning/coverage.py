@@ -73,17 +73,14 @@ class SimpleWallFollower:
         self.start_pose: Optional[Tuple[float, float, float]] = None
         self.lap_complete = False
 
+        # Rotation tracking for IMU-based completion
+        self.total_rotation = 0.0  # Cumulative rotation in radians
+        self.last_theta: Optional[float] = None  # Previous theta for rotation tracking
+
         # Parameters
         self.sensor_back_threshold = 2.0  # degrees
         self.lap_close_distance = 0.1  # m - distance to start to consider lap complete
-
-        # Edge correction parameters
-        self.edge_timeout = 2.0  # seconds without edge detection before correction
-        self.correction_angle = np.deg2rad(15.0)  # 15 degrees correction angle
-        self.last_edge_time = None  # absolute time of last edge detection
-        self.edge_side = None  # which edge we're following: "left" or "right"
-        self.correction_active = False  # whether we're currently applying correction
-        self.correction_start_theta = None  # heading when correction started
+        self.rotation_completion_threshold = 2.1 * np.pi  # 360 degrees in radians
 
     def update(
         self,
@@ -109,19 +106,35 @@ class SimpleWallFollower:
         # Initialize start pose on first call
         if self.start_pose is None:
             self.start_pose = pose
+            self.last_theta = theta
 
-        # Check if we've completed a lap
-        if not self.lap_complete and self.start_pose:
-            dx = x - self.start_pose[0]
-            dy = y - self.start_pose[1]
-            dist = np.sqrt(dx * dx + dy * dy)
-            if dist < self.lap_close_distance and len(self.edge_points) > 10:
-                # Check if we're heading in roughly the same direction
-                dtheta = abs(theta - self.start_pose[2])
-                dtheta = min(dtheta, 2 * np.pi - dtheta)
-                if dtheta < np.deg2rad(45):
-                    self.lap_complete = True
-                    self.state = WallFollowState.COMPLETE
+        # Track cumulative rotation (IMU-based completion)
+        if self.last_theta is not None:
+            # Compute change in theta, handling wrap-around
+            dtheta = theta - self.last_theta
+            # Normalize to [-pi, pi]
+            dtheta = ((dtheta + np.pi) % (2 * np.pi)) - np.pi
+            # Accumulate absolute rotation (always positive)
+            self.total_rotation += abs(dtheta)
+        self.last_theta = theta
+
+        # Check if we've completed a lap based on rotation (360 degrees)
+        if not self.lap_complete:
+            if self.total_rotation >= self.rotation_completion_threshold:
+                self.lap_complete = True
+                self.state = WallFollowState.COMPLETE
+            # Also check position-based completion (backup method)
+            elif self.start_pose:
+                dx = x - self.start_pose[0]
+                dy = y - self.start_pose[1]
+                dist = np.sqrt(dx * dx + dy * dy)
+                if dist < self.lap_close_distance and len(self.edge_points) > 10:
+                    # Check if we're heading in roughly the same direction
+                    dtheta = abs(theta - self.start_pose[2])
+                    dtheta = min(dtheta, 2 * np.pi - dtheta)
+                    if dtheta < np.deg2rad(45):
+                        self.lap_complete = True
+                        self.state = WallFollowState.COMPLETE
 
         if self.lap_complete:
             return 0.0, 0.0
@@ -193,10 +206,6 @@ class SimpleWallFollower:
                 sensor_back = left_sensor_on
 
             if sensor_back:
-                # Reset edge tracking when entering FORWARD_ALONG_WALL
-                self.last_edge_time = time.time()
-                self.correction_active = False
-                self.correction_start_theta = None
                 self.state = WallFollowState.FORWARD_ALONG_WALL
             return 0.0, self.turn_speed * self.turn_direction
 
@@ -208,12 +217,6 @@ class SimpleWallFollower:
                     self._add_edge_point(pose, "right")
                 elif not left_sensor_on:
                     self._add_edge_point(pose, "left")
-
-                # Reset edge timeout and correction state
-                self.last_edge_time = time.time()
-                self.correction_active = False
-                self.correction_start_theta = None
-                self.edge_side = None  # Reset to recalculate on next FORWARD_ALONG_WALL
 
                 # Maintain consistent direction based on initial turn direction
                 # The turn direction should match the initial direction to keep going
@@ -231,65 +234,6 @@ class SimpleWallFollower:
                 self.sensor_back_theta = None
                 self.state = WallFollowState.TURN_AWAY
                 return self.forward_speed, 0.0
-
-            # Track which edge we're following based on initial turn direction
-            # If turning left (CCW), we're following right edge; if turning right (CW), we're following left edge
-            if self.edge_side is None:
-                if self.initial_turn_direction is not None:
-                    self.edge_side = (
-                        "right" if self.initial_turn_direction > 0 else "left"
-                    )
-                else:
-                    # Fallback: determine from current sensor state
-                    # If right sensor is on, we're following right edge; if left sensor is on, we're following left edge
-                    self.edge_side = "right" if right_sensor_on else "left"
-
-            # Initialize last_edge_time if not set
-            if self.last_edge_time is None:
-                self.last_edge_time = time.time()
-
-            # Check elapsed time since last edge
-            current_time = time.time()
-            time_since_last_edge = current_time - self.last_edge_time
-
-            # Check if we need to apply correction
-            if time_since_last_edge >= self.edge_timeout:
-                # Ensure edge_side is set before applying correction
-                if self.edge_side is None:
-                    # Fallback: determine from current sensor state
-                    self.edge_side = "right" if right_sensor_on else "left"
-
-                if not self.correction_active:
-                    # Start correction: turn slightly towards the edge
-                    self.correction_active = True
-                    self.correction_start_theta = theta
-
-                # Check if we've completed the correction angle
-                if self.correction_start_theta is not None:
-                    dtheta = theta - self.correction_start_theta
-                    dtheta = (
-                        (dtheta + np.pi) % (2 * np.pi)
-                    ) - np.pi  # Wrap to [-pi, pi]
-
-                    # Determine correction direction: turn towards the edge
-                    # If following right edge, turn right (negative omega)
-                    # If following left edge, turn left (positive omega)
-                    correction_direction = -1.0 if self.edge_side == "right" else 1.0
-
-                    if abs(dtheta) >= self.correction_angle:
-                        # Correction complete, reset and continue forward
-                        self.correction_active = False
-                        self.last_edge_time = (
-                            time.time()
-                        )  # Reset timer after correction
-                        self.correction_start_theta = None
-                        return self.forward_speed, 0.0
-                    else:
-                        # Apply correction turn
-                        return (
-                            self.forward_speed,
-                            self.turn_speed * correction_direction,
-                        )
 
             # Normal forward motion
             return self.forward_speed, 0.0
@@ -321,6 +265,14 @@ class SimpleWallFollower:
     def is_complete(self) -> bool:
         """Check if wall-following is complete."""
         return self.lap_complete
+
+    def get_total_rotation(self) -> float:
+        """Get cumulative rotation in radians."""
+        return self.total_rotation
+
+    def get_total_rotation_degrees(self) -> float:
+        """Get cumulative rotation in degrees."""
+        return np.rad2deg(self.total_rotation)
 
 
 class SimpleRectangleFit:
@@ -799,6 +751,38 @@ class CoveragePlanner:
         """
         self.rectangle = rect
 
+    def get_inset_rectangle(self) -> Optional[Tuple[float, float, float, float, float]]:
+        """
+        Compute inset rectangle for coverage planning.
+
+        The detected rectangle represents where sensors detected edges.
+        We need to inset by the distance from wheelbase to where the vacuum would be
+        when sensors are at the detected edge. This ensures the vacuum stays on the table.
+
+        When sensors are at edge, vacuum is at: SENSOR_FWD + SENSOR_TO_VAC from wheelbase
+        So we inset by this distance to ensure vacuum doesn't go off the table.
+
+        Returns:
+            (cx, cy, heading, width, height) inset rectangle, or None if no rectangle set
+        """
+        if not self.rectangle:
+            return None
+
+        cx, cy, heading, width, height = self.rectangle
+
+        # Inset distance: distance from wheelbase to vacuum position when sensors are at edge
+        # vacuum_offset = SENSOR_FWD + SENSOR_TO_VAC
+        # This is the distance from wheelbase to vacuum when sensors are at edge
+        vacuum_offset = GEOM.SENSOR_FWD + GEOM.SENSOR_TO_VAC
+
+        # Inset from each side (reduce width and height by 2 * inset)
+        # Use abs() since SENSOR_TO_VAC is negative (vacuum behind sensors)
+        inset_width = max(0.01, width - 2 * abs(vacuum_offset))  # Ensure positive
+        inset_height = max(0.01, height - 2 * abs(vacuum_offset))  # Ensure positive
+
+        # Center remains the same, only dimensions change
+        return (cx, cy, heading, inset_width, inset_height)
+
     def build_lanes(self) -> List[List[Tuple[float, float]]]:
         """
         Build boustrophedon lanes.
@@ -809,19 +793,25 @@ class CoveragePlanner:
         if not self.rectangle:
             return []
 
-        cx, cy, heading, width, height = self.rectangle
+        # Use inset rectangle for coverage planning
+        # This accounts for vacuum being behind sensors
+        inset_rect = self.get_inset_rectangle()
+        if not inset_rect:
+            return []
 
-        # Inset rectangle to account for robot size
-        inset = ALG.RECT_INSET if hasattr(ALG, "RECT_INSET") else 0.05
+        cx, cy, heading, width, height = inset_rect
+
+        # Additional inset to account for robot size and overlap
+        additional_inset = ALG.RECT_INSET if hasattr(ALG, "RECT_INSET") else 0.05
         lane_width = (
             GEOM.VAC_WIDTH - ALG.SWEEP_OVERLAP
             if hasattr(ALG, "SWEEP_OVERLAP")
             else GEOM.VAC_WIDTH - 0.02
         )
 
-        # Compute number of lanes
-        inner_width = width - 2 * inset
-        inner_height = height - 2 * inset
+        # Compute number of lanes (using already-inset rectangle)
+        inner_width = width - 2 * additional_inset
+        inner_height = height - 2 * additional_inset
 
         # Determine lane direction (along longer dimension)
         if inner_width > inner_height:
@@ -937,6 +927,19 @@ class CoveragePlanner:
                 # Turn in place at start of next lane to face lane direction
                 path.append((next_start[0], next_start[1], next_lane_heading))
 
+        # Add final waypoint at the end of the last lane to ensure completion detection
+        if lanes:
+            last_lane = lanes[-1]
+            last_end = last_lane[1]  # End point of last lane
+            # Use the same heading as the last lane
+            last_start = last_lane[0]
+            dx = last_end[0] - last_start[0]
+            dy = last_end[1] - last_start[1]
+            final_heading = np.arctan2(dy, dx)
+            # Add final waypoint (duplicate of last lane end with same heading)
+            # This ensures we have a clear completion point
+            path.append((last_end[0], last_end[1], final_heading))
+
         return path
 
     def get_current_lane(self) -> Optional[List[Tuple[float, float]]]:
@@ -962,7 +965,9 @@ class CoveragePlanner:
         if not self.path:
             return
 
-        if self.current_waypoint_idx < len(self.path) - 1:
+        # Advance to next waypoint, allowing advancement past the last waypoint
+        # This ensures is_complete() can properly detect completion
+        if self.current_waypoint_idx < len(self.path):
             self.current_waypoint_idx += 1
 
     def get_current_lane_index(self) -> Optional[int]:

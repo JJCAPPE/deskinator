@@ -176,6 +176,19 @@ class Visualizer:
         )
         self.ax_map.add_patch(self.patch_ground_truth)
 
+        # Coverage Area Rectangle (inset rectangle for path planning)
+        self.patch_coverage_area = Rectangle(
+            (0, 0),
+            0,
+            0,
+            facecolor="none",
+            edgecolor="blue",
+            linewidth=2,
+            linestyle=":",
+            label="Coverage Area",
+        )
+        self.ax_map.add_patch(self.patch_coverage_area)
+
         # Text Status
         self.txt_status = self.ax_map.text(
             0.02,
@@ -187,8 +200,17 @@ class Visualizer:
             zorder=20,
         )
 
-        # Legend (create once)
-        self.ax_map.legend(loc="lower left", fontsize="small")
+        # Legend (create once, positioned outside at bottom)
+        self.ax_map.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.05),
+            ncol=4,
+            fontsize="small",
+            frameon=True,
+        )
+
+        # Adjust layout to make room for legend
+        self.fig.tight_layout(rect=[0, 0.05, 1, 1])
 
         # Show window
         plt.show(block=False)
@@ -209,6 +231,7 @@ class Visualizer:
         tactile_hits: Optional[List[Tuple[float, float]]] = None,
         ground_truth_bounds: Optional[Tuple[float, float, float, float]] = None,
         coverage_lanes: Optional[List[List[Tuple[float, float]]]] = None,
+        coverage_area_rect: Optional[Tuple[float, float, float, float, float]] = None,
     ):
         """Update visualization efficiently."""
         if not self.enabled:
@@ -359,6 +382,23 @@ class Visualizer:
         else:
             # Hide if not confident
             self.patch_boundary.set_width(0)
+
+        # 6.5. Update Coverage Area Rectangle (inset rectangle)
+        if coverage_area_rect:
+            cx, cy, heading, width, height = coverage_area_rect
+            rect_t = (
+                transforms.Affine2D().rotate_around(0, 0, heading).translate(cx, cy)
+            )
+
+            self.patch_coverage_area.set_width(width)
+            self.patch_coverage_area.set_height(height)
+            self.patch_coverage_area.set_xy((-width / 2, -height / 2))
+            self.patch_coverage_area.set_transform(rect_t + self.ax_map.transData)
+            self.patch_coverage_area.set_visible(True)
+        else:
+            # Hide if not available
+            self.patch_coverage_area.set_width(0)
+            self.patch_coverage_area.set_visible(False)
 
         # 7. Update Ground Truth
         if ground_truth_bounds:

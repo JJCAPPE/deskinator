@@ -57,6 +57,7 @@ class Geometry:
         -0.11984,
     )  # m; left and right sensor lateral positions
     VAC_WIDTH: float = 0.200  # m; effective cleaned width
+    VAC_DEPTH: float = 0.14  # m; effective cleaned depth (14cm)
     SENSOR_TO_VAC: float = -0.07566  # m; vacuum behind sensors
 
 
@@ -89,7 +90,7 @@ class Algo:
     NODE_SPACING: float = 0.05  # m
     LOOP_RADIUS: float = 0.06  # m
     SWEEP_OVERLAP: float = 0.02  # m
-    GRID_RES: float = 0.02  # m (2 cm raster)
+    GRID_RES: float = 0.01  # m (1 cm raster)
     RECT_CONF_MIN_LEN: float = (
         2.0  # m of perimeter observed (for 2m x 2m = 8m perimeter)
     )

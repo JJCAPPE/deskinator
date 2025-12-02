@@ -120,8 +120,10 @@ class SweptMap:
 
         # Compute vacuum footprint
         # Vacuum is at SENSOR_FWD + SENSOR_TO_VAC ahead of axle
+        # Since SENSOR_TO_VAC is negative, vacuum is behind sensors
         vac_offset = GEOM.SENSOR_FWD + GEOM.SENSOR_TO_VAC
         vac_width = GEOM.VAC_WIDTH
+        vac_depth = GEOM.VAC_DEPTH
 
         # Sample along the path
         n_samples = max(1, int(ds / (self.resolution / 2)))
@@ -134,12 +136,21 @@ class SweptMap:
             x_s = x + s * np.cos(theta)
             y_s = y + s * np.sin(theta)
 
-            # Vacuum center position
+            # Vacuum center position (behind sensors)
+            # vac_offset = SENSOR_FWD + SENSOR_TO_VAC = 0.21655 + (-0.07566) = 0.14089 m from axle
             vac_x = x_s + vac_offset * np.cos(theta)
             vac_y = y_s + vac_offset * np.sin(theta)
 
             # Mark rectangular footprint
-            self._mark_rectangle(vac_x, vac_y, theta, vac_width, ds / n_samples)
+            # The vacuum depth extends backward from the vacuum center (toward the robot)
+            # Position rectangle center so its forward edge aligns with vacuum center
+            # If rectangle is centered at C and has depth D, it extends from C-D/2 to C+D/2
+            # We want C+D/2 = vac_center, so C = vac_center - D/2
+            rect_center_offset = -vac_depth / 2  # Negative = backward toward robot
+            rect_center_x = vac_x + rect_center_offset * np.cos(theta)
+            rect_center_y = vac_y + rect_center_offset * np.sin(theta)
+
+            self._mark_rectangle(rect_center_x, rect_center_y, theta, vac_width, vac_depth)
 
     def _mark_rectangle(
         self, cx: float, cy: float, theta: float, width: float, length: float
