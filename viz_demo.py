@@ -426,7 +426,7 @@ def simulate_coverage(
 
     # Simple pure pursuit controller
     def pure_pursuit(pose, waypoint, lookahead=0.15):
-        """Simple pure pursuit controller."""
+        """Simple pure pursuit controller with free rotation when stationary."""
         x, y, theta = pose
         wx, wy = waypoint
 
@@ -441,50 +441,38 @@ def simulate_coverage(
         dtheta = desired_theta - theta
         dtheta = ((dtheta + np.pi) % (2 * np.pi)) - np.pi  # Wrap to [-pi, pi]
 
-        # If very close to waypoint, still allow small forward motion and turning
-        # This prevents getting stuck when waypoints overlap or are very close
-        if dist < 0.02:  # Very close - just turn towards next waypoint
-            # Turn in place if heading error is large, otherwise allow small forward motion
-            if abs(dtheta) > np.deg2rad(30):
-                return 0.0, 2.0 * dtheta * speed_multiplier
-            else:
-                return (
-                    LIMS.V_BASE * 0.3 * speed_multiplier,
-                    2.0 * dtheta * speed_multiplier,
-                )
+        # Base parameters
+        v_base = LIMS.V_BASE * speed_multiplier
+        omega_max = LIMS.OMEGA_MAX * speed_multiplier
         
-        # If heading error is large, turn in place first
-        # This is critical for the transition from boundary discovery to coverage
-        # Relaxed constraint: only turn in place if error is > 45 degrees (was 20)
-        # This prevents getting stuck if we are slightly misaligned but can still move
-        if abs(dtheta) > np.deg2rad(45):
-             # Turn in place
-             v = 0.0
-             omega = 2.0 * dtheta * speed_multiplier
-             # Clamp omega
-             omega = np.clip(
-                omega, -LIMS.OMEGA_MAX * speed_multiplier, LIMS.OMEGA_MAX * speed_multiplier
-             )
-             return v, omega
-
-        elif dist < 0.05:  # Close but not very close - slow forward motion
-            v = LIMS.V_BASE * 0.3 * speed_multiplier
-            omega = 2.0 * dtheta * speed_multiplier
-            omega = np.clip(
-                omega,
-                -LIMS.OMEGA_MAX * speed_multiplier,
-                LIMS.OMEGA_MAX * speed_multiplier,
-            )
-            return v, omega
-
-        # Control
-        v = LIMS.V_BASE if dist > lookahead else LIMS.V_BASE * 0.5
-        v *= speed_multiplier
-        omega = 2.0 * dtheta  # Proportional control
-        omega = np.clip(
-            omega, -LIMS.OMEGA_MAX * speed_multiplier, LIMS.OMEGA_MAX * speed_multiplier
-        )
-
+        # Threshold for turning in place vs moving
+        # If heading error is large, turn in place first (free rotation)
+        turn_in_place_threshold = np.deg2rad(30)
+        
+        if abs(dtheta) > turn_in_place_threshold:
+            # Turn in place - NO constraints on omega when stationary
+            v = 0.0
+            # Use larger gain for faster turning when stationary
+            kp_omega_stationary = 3.0
+            omega = kp_omega_stationary * dtheta
+            # Clamp omega to max
+            omega = np.clip(omega, -omega_max, omega_max)
+        else:
+            # Moving forward - apply velocity scaling based on remaining heading error
+            # Scale velocity smoothly: 1.0 at 0 error, 0.3 at threshold
+            min_scale = 0.3
+            scale = min_scale + (1.0 - min_scale) * (1.0 - abs(dtheta) / turn_in_place_threshold)
+            v = v_base * scale
+            
+            # If we are very close to waypoint, slow down further
+            if dist < 0.1:
+                v *= 0.5
+            
+            # Angular velocity control while moving (gentler)
+            kp_omega_moving = 2.0
+            omega = kp_omega_moving * dtheta
+            omega = np.clip(omega, -omega_max, omega_max)
+        
         return v, omega
 
     # Simulation parameters
