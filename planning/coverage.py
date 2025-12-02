@@ -783,9 +783,15 @@ class CoveragePlanner:
         # Center remains the same, only dimensions change
         return (cx, cy, heading, inset_width, inset_height)
 
-    def build_lanes(self) -> List[List[Tuple[float, float]]]:
+    def build_lanes(
+        self, start_pose: Optional[Tuple[float, float, float]] = None
+    ) -> List[List[Tuple[float, float]]]:
         """
         Build boustrophedon lanes.
+
+        Args:
+            start_pose: Optional robot pose (x, y, theta) to optimize start point.
+                       If provided, will choose the corner closest to this pose.
 
         Returns:
             List of lanes, each lane is a list of waypoints
@@ -819,20 +825,23 @@ class CoveragePlanner:
             num_lanes = int(np.ceil(inner_width / lane_width))
             lane_spacing = inner_width / max(1, num_lanes)
             lane_length = inner_height
+            lanes_vertical = True
         else:
             # Lanes along width (horizontal)
             num_lanes = int(np.ceil(inner_height / lane_width))
             lane_spacing = inner_height / max(1, num_lanes)
             lane_length = inner_width
+            lanes_vertical = False
 
         # Rotation matrix
         c, s = np.cos(heading), np.sin(heading)
         R = np.array([[c, -s], [s, c]])
 
-        lanes = []
+        # Generate base lanes
+        base_lanes = []
         for i in range(num_lanes):
             # Compute lane endpoints in rectangle-local frame
-            if inner_width > inner_height:
+            if lanes_vertical:
                 # Vertical lanes
                 x_local = -inner_width / 2 + (i + 0.5) * lane_spacing
                 start_local = np.array([x_local, -inner_height / 2])
@@ -847,23 +856,88 @@ class CoveragePlanner:
             start_world = np.array([cx, cy]) + R @ start_local
             end_world = np.array([cx, cy]) + R @ end_local
 
-            # Alternate direction for boustrophedon pattern
-            if i % 2 == 0:
-                lane = [(start_world[0], start_world[1]), (end_world[0], end_world[1])]
-            else:
-                lane = [(end_world[0], end_world[1]), (start_world[0], start_world[1])]
+            base_lanes.append((start_world, end_world))
 
-            lanes.append(lane)
+        # Helper to create lanes list from base lanes with specific ordering
+        def create_lanes_variant(
+            reverse_order: bool, reverse_direction: bool
+        ) -> List[List[Tuple[float, float]]]:
+            variant_lanes = []
+            indices = range(num_lanes)
+            if reverse_order:
+                indices = reversed(indices)
 
-        self.lanes = lanes
+            for i, idx in enumerate(indices):
+                start, end = base_lanes[idx]
+                
+                # Determine direction for this lane (alternating)
+                # If reverse_direction is True, we flip the logic
+                # Standard: even indices (0, 2, ...) go start->end
+                #           odd indices (1, 3, ...) go end->start
+                
+                # However, "i" here is the index in the sequence of visitation
+                # So we just alternate based on i
+                
+                # Actually, to maintain the boustrophedon pattern correctly when reversing order,
+                # we need to be careful.
+                # Let's just define the direction based on the visitation index i.
+                
+                use_start_to_end = (i % 2 == 0)
+                if reverse_direction:
+                    use_start_to_end = not use_start_to_end
+                
+                if use_start_to_end:
+                    lane = [(start[0], start[1]), (end[0], end[1])]
+                else:
+                    lane = [(end[0], end[1]), (start[0], start[1])]
+                
+                variant_lanes.append(lane)
+            return variant_lanes
+
+        # If start_pose is provided, find the best variant
+        if start_pose is not None:
+            robot_pos = np.array([start_pose[0], start_pose[1]])
+            best_lanes = []
+            min_dist = float("inf")
+
+            # Try 4 variants
+            # 1. Normal order, normal direction
+            # 2. Normal order, reversed direction (start at other end of first lane)
+            # 3. Reversed order (start at last lane), normal direction
+            # 4. Reversed order, reversed direction
+            
+            variants = [
+                (False, False),
+                (False, True),
+                (True, False),
+                (True, True),
+            ]
+
+            for rev_order, rev_dir in variants:
+                candidate_lanes = create_lanes_variant(rev_order, rev_dir)
+                if not candidate_lanes:
+                    continue
+                    
+                # Check distance to start of first lane
+                first_pt = np.array(candidate_lanes[0][0])
+                dist = np.linalg.norm(robot_pos - first_pt)
+                
+                if dist < min_dist:
+                    min_dist = dist
+                    best_lanes = candidate_lanes
+            
+            self.lanes = best_lanes
+        else:
+            # Default behavior
+            self.lanes = create_lanes_variant(False, False)
 
         # Build complete path with orientations and transitions
         self.path = self._build_path_with_transitions(
-            lanes, heading, inner_width > inner_height
+            self.lanes, heading, lanes_vertical
         )
         self.current_waypoint_idx = 0
 
-        return lanes
+        return self.lanes
 
     def _build_path_with_transitions(
         self,

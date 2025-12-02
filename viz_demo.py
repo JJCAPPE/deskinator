@@ -399,7 +399,9 @@ def simulate_coverage(
     # Create coverage planner
     planner = CoveragePlanner()
     planner.set_rectangle(rectangle)
-    lanes = planner.build_lanes()
+    
+    # Pass current robot pose to optimize start point
+    lanes = planner.build_lanes(start_pose=robot.get_pose())
 
     print(f"Generated {len(lanes)} coverage lanes")
 
@@ -411,17 +413,16 @@ def simulate_coverage(
     if viz is None:
         viz = Visualizer(figsize=(14, 8))
 
-    # Reset robot to start of first lane with correct orientation
+    # Do NOT reset robot pose - continue from where wall following left off
+    # This ensures smooth transition without teleportation
+    
+    # Add a transition waypoint to the start of the first lane if needed
     if lanes:
         first_waypoint_data = planner.get_current_waypoint()
         if first_waypoint_data:
-            wx, wy, wtheta = first_waypoint_data
-            robot.pose = np.array([wx, wy, wtheta])  # Start with correct orientation
-        else:
-            # Fallback: use lane start point
-            start_waypoint = lanes[0][0]
-            robot.pose = np.array([start_waypoint[0], start_waypoint[1], 0.0])
-        robot.trajectory = [tuple(robot.pose)]
+            # Check if we need to add explicit path to start
+            # The planner path already includes transitions, but we might be far from the first point
+            pass
 
     # Simple pure pursuit controller
     def pure_pursuit(pose, waypoint, lookahead=0.15):
@@ -433,13 +434,16 @@ def simulate_coverage(
         dy = wy - y
         dist = np.sqrt(dx * dx + dy * dy)
 
+        # Desired heading
+        desired_theta = np.arctan2(dy, dx)
+
+        # Heading error
+        dtheta = desired_theta - theta
+        dtheta = ((dtheta + np.pi) % (2 * np.pi)) - np.pi  # Wrap to [-pi, pi]
+
         # If very close to waypoint, still allow small forward motion and turning
         # This prevents getting stuck when waypoints overlap or are very close
         if dist < 0.02:  # Very close - just turn towards next waypoint
-            # Desired heading
-            desired_theta = np.arctan2(dy, dx)
-            dtheta = desired_theta - theta
-            dtheta = ((dtheta + np.pi) % (2 * np.pi)) - np.pi  # Wrap to [-pi, pi]
             # Turn in place if heading error is large, otherwise allow small forward motion
             if abs(dtheta) > np.deg2rad(30):
                 return 0.0, 2.0 * dtheta * speed_multiplier
@@ -448,10 +452,22 @@ def simulate_coverage(
                     LIMS.V_BASE * 0.3 * speed_multiplier,
                     2.0 * dtheta * speed_multiplier,
                 )
+        
+        # If heading error is large, turn in place first
+        # This is critical for the transition from boundary discovery to coverage
+        # Relaxed constraint: only turn in place if error is > 45 degrees (was 20)
+        # This prevents getting stuck if we are slightly misaligned but can still move
+        if abs(dtheta) > np.deg2rad(45):
+             # Turn in place
+             v = 0.0
+             omega = 2.0 * dtheta * speed_multiplier
+             # Clamp omega
+             omega = np.clip(
+                omega, -LIMS.OMEGA_MAX * speed_multiplier, LIMS.OMEGA_MAX * speed_multiplier
+             )
+             return v, omega
+
         elif dist < 0.05:  # Close but not very close - slow forward motion
-            desired_theta = np.arctan2(dy, dx)
-            dtheta = desired_theta - theta
-            dtheta = ((dtheta + np.pi) % (2 * np.pi)) - np.pi
             v = LIMS.V_BASE * 0.3 * speed_multiplier
             omega = 2.0 * dtheta * speed_multiplier
             omega = np.clip(
@@ -460,13 +476,6 @@ def simulate_coverage(
                 LIMS.OMEGA_MAX * speed_multiplier,
             )
             return v, omega
-
-        # Desired heading
-        desired_theta = np.arctan2(dy, dx)
-
-        # Heading error
-        dtheta = desired_theta - theta
-        dtheta = ((dtheta + np.pi) % (2 * np.pi)) - np.pi  # Wrap to [-pi, pi]
 
         # Control
         v = LIMS.V_BASE if dist > lookahead else LIMS.V_BASE * 0.5
