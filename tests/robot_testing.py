@@ -36,7 +36,12 @@ from config import GEOM, ALG, LIMS
 from analysis_utils import calculate_rectangle_error, calculate_trajectory_distance
 
 # Import viz_demo components for robot simulation
-from viz_demo import SimulatedRobot, TableSimulator
+from viz_demo import (
+    SimulatedRobot, 
+    TableSimulator, 
+    simulate_wall_following, 
+    simulate_coverage
+)
 
 
 # Sentinel object to indicate visualization should be disabled
@@ -65,153 +70,31 @@ def run_single_trial(
         print(f"\nTrial {trial_num}:")
         print("-" * 40)
 
-    # Create table (standard 2m x 2m)
-    table = TableSimulator(center=(0.0, 0.0), width=2.0, height=2.0, heading=0.0)
-    ground_truth = table.get_ground_truth_rect()
-
-    # Random start position
-    start_x = np.random.uniform(table.min_x + 0.2, table.max_x - 0.2)
-    start_y = np.random.uniform(table.min_y + 0.2, table.max_y - 0.2)
-    start_theta = np.random.uniform(0, 2 * np.pi)
-    start_pose = (start_x, start_y, start_theta)
-
-    if verbose:
-        print(
-            f"  Start: ({start_x:.2f}, {start_y:.2f}, {np.rad2deg(start_theta):.1f}°)"
-        )
-
-    # Create robot
-    robot = SimulatedRobot(start_pose, table.get_bounds())
-
-    # Create wall follower - match viz_demo.py exactly: multiply BOTH speeds
-    wall_follower = SimpleWallFollower(
-        forward_speed=ALG.BOUNDARY_SPEED * speed_multiplier,
-        turn_speed=LIMS.OMEGA_MAX * speed_multiplier,
-    )
-
-    # Create rectangle fitter
-    rect_fit = SimpleRectangleFit()
-
+    # Create or reuse visualizer (passed from main)
+    # If viz is None, we pass None to simulation functions (no visualization)
+    
     # Create swept map
     swept_map = SweptMap()
 
-    # Visualizer is passed from main (or None if --no-viz was used)
-    # No need to create one here - it's created in main and reused for all trials
-
-    # Simulation parameters
-    dt = 0.05
-    max_time = 300.0
-
     # === PHASE 1: Boundary Discovery ===
     t_boundary_start = time.time()
-    t = 0.0
-
-    while t < max_time and not wall_follower.is_complete():
-        # Read sensors
-        left_on, right_on = robot.read_sensors()
-
-        # Update wall follower
-        pose = robot.get_pose()
-        v, omega = wall_follower.update(pose, left_on, right_on, dt)
-
-        # Update robot
-        robot.update(v, omega, dt)
-
-        # Update swept map
-        if v > 0:
-            swept_map.add_forward_sweep(pose, v * dt)
-
-        # Add edge points
-        edge_points = wall_follower.get_edge_points()
-        if edge_points:
-            current_count = len(rect_fit.edge_points)
-            if len(edge_points) > current_count:
-                for point in edge_points[current_count:]:
-                    rect_fit.add_edge_point(point)
-
-        # Fit rectangle periodically
-        if len(rect_fit.edge_points) > 4 and len(rect_fit.edge_points) % 5 == 0:
-            rect_fit.fit()
-
-        # Update visualization every 5 steps (4 Hz) - match viz_demo.py exactly
-        if viz is not None and int(t / dt) % 5 == 0:
-            poses = robot.trajectory
-            edge_points_list = rect_fit.edge_points
-            rectangle = rect_fit.get_rectangle()
-            ground_truth_rect = table.get_ground_truth_rect()
-
-            # Get coverage grid from swept map
-            coverage_grid = swept_map.get_grid()
-            bounds = (
-                swept_map.min_x,
-                swept_map.max_x,
-                swept_map.min_y,
-                swept_map.max_y,
-            )
-
-            total_rotation_deg = wall_follower.get_total_rotation_degrees()
-            rotation_progress = min(100.0, (total_rotation_deg / 360.0) * 100.0)
-
-            status = f"Trial {trial_num} - Boundary Discovery\n"
-            status += f"State: {wall_follower.state.value}\n"
-            status += f"Time: {t:.1f}s\n"
-            status += (
-                f"Rotation: {total_rotation_deg:.1f}° ({rotation_progress:.1f}%)\n"
-            )
-            status += f"Edge points: {len(edge_points_list)}\n"
-            if rectangle:
-                status += f"Rectangle: {rectangle[3]:.2f} x {rectangle[4]:.2f} m"
-
-            viz.update(
-                poses=poses,
-                edge_points=edge_points_list,
-                rectangle=rectangle,
-                coverage_grid=coverage_grid,
-                swept_map_bounds=bounds,
-                text_info=status,
-                robot_state=wall_follower.state.value,
-                ground_truth_bounds=(
-                    table.min_x,
-                    table.max_x,
-                    table.min_y,
-                    table.max_y,
-                ),
-            )
-
-        t += dt
-
-    # Final rectangle fit
-    rect_fit.fit()
-    rectangle = rect_fit.get_rectangle()
+    
+    # Run wall following simulation
+    robot, wall_follower, rect_fit, table, _, swept_map, boundary_sim_time = simulate_wall_following(
+        speed_multiplier=speed_multiplier,
+        viz=viz,
+        swept_map=swept_map,
+        verbose=verbose
+    )
 
     boundary_time = time.time() - t_boundary_start
-    boundary_sim_time = t
+    rectangle = rect_fit.get_rectangle()
 
     if verbose:
         print(
             f"  Boundary discovery: {boundary_sim_time:.1f}s (wall time: {boundary_time:.2f}s)"
         )
         print(f"  Edge points: {len(rect_fit.edge_points)}")
-
-    # Final visualization update for boundary phase
-    if viz is not None:
-        coverage_grid = swept_map.get_grid()
-        bounds = (
-            swept_map.min_x,
-            swept_map.max_x,
-            swept_map.min_y,
-            swept_map.max_y,
-        )
-        viz.update(
-            poses=robot.trajectory,
-            edge_points=rect_fit.edge_points,
-            rectangle=rectangle,
-            coverage_grid=coverage_grid,
-            swept_map_bounds=bounds,
-            text_info=f"Trial {trial_num} - Boundary Complete!\nEdge points: {len(rect_fit.edge_points)}\nRectangle fitted: {rectangle is not None}",
-            robot_state="COMPLETE",
-            ground_truth_bounds=(table.min_x, table.max_x, table.min_y, table.max_y),
-        )
 
     # Track trajectory at boundary completion
     boundary_trajectory_length = len(robot.trajectory)
@@ -220,255 +103,29 @@ def run_single_trial(
     coverage_success = False
     coverage_time_real = 0.0
     coverage_sim_time = 0.0
+    planner = None
 
     if rectangle:
         t_coverage_start = time.time()
-        t = 0.0
-
-        # Create coverage planner
-        planner = CoveragePlanner()
-        planner.set_rectangle(rectangle)
-        lanes = planner.build_lanes(start_pose=robot.get_pose())
-
-        if verbose:
-            print(f"  Coverage lanes: {len(lanes)}")
-
-        # Pure pursuit controller - match viz_demo.py exactly
-        def pure_pursuit(pose, waypoint, lookahead=0.15):
-            """Simple pure pursuit controller with free rotation when stationary."""
-            x, y, theta = pose
-            wx, wy = waypoint
-
-            dx = wx - x
-            dy = wy - y
-            dist = np.sqrt(dx * dx + dy * dy)
-
-            # Desired heading
-            desired_theta = np.arctan2(dy, dx)
-
-            # Heading error
-            dtheta = desired_theta - theta
-            dtheta = ((dtheta + np.pi) % (2 * np.pi)) - np.pi  # Wrap to [-pi, pi]
-
-            # Base parameters
-            v_base = LIMS.V_BASE * speed_multiplier
-            omega_max = LIMS.OMEGA_MAX * speed_multiplier
-
-            # Threshold for turning in place vs moving
-            # If heading error is large, turn in place first (free rotation)
-            turn_in_place_threshold = np.deg2rad(30)
-
-            if abs(dtheta) > turn_in_place_threshold:
-                # Turn in place - NO constraints on omega when stationary
-                v = 0.0
-                # Use larger gain for faster turning when stationary
-                kp_omega_stationary = 3.0
-                omega = kp_omega_stationary * dtheta
-                # Clamp omega to max
-                omega = np.clip(omega, -omega_max, omega_max)
-            else:
-                # Moving forward - apply velocity scaling based on remaining heading error
-                # Scale velocity smoothly: 1.0 at 0 error, 0.3 at threshold
-                min_scale = 0.3
-                scale = min_scale + (1.0 - min_scale) * (
-                    1.0 - abs(dtheta) / turn_in_place_threshold
-                )
-                v = v_base * scale
-
-                # If we are very close to waypoint, slow down further
-                if dist < 0.1:
-                    v *= 0.5
-
-                # Angular velocity control while moving (gentler)
-                kp_omega_moving = 2.0
-                omega = kp_omega_moving * dtheta
-                omega = np.clip(omega, -omega_max, omega_max)
-
-            return v, omega
-
-        # Coverage execution
-        max_coverage_time = (
-            600.0  # Large safety timeout (10 minutes) - should not be reached
+        
+        # Run coverage simulation
+        coverage_success, coverage_sim_time, planner = simulate_coverage(
+            robot=robot,
+            rect_fit=rect_fit,
+            table=table,
+            speed_multiplier=speed_multiplier,
+            viz=viz,
+            swept_map=swept_map,
+            verbose=verbose
         )
-        last_advance_time = (
-            -1.0
-        )  # Track when we last advanced to prevent rapid advances
-
-        # Check if robot starts at first waypoint - if so, advance if oriented correctly
-        initial_pose = robot.get_pose()
-        first_waypoint = planner.get_current_waypoint()
-        if first_waypoint:
-            wx, wy, wtheta = first_waypoint
-            dx = wx - initial_pose[0]
-            dy = wy - initial_pose[1]
-            dist = np.sqrt(dx * dx + dy * dy)
-            dtheta = wtheta - initial_pose[2]
-            dtheta = ((dtheta + np.pi) % (2 * np.pi)) - np.pi
-            if dist < 0.1 and abs(dtheta) < np.deg2rad(
-                15
-            ):  # Close in position and roughly oriented
-                if verbose:
-                    print(f"  [Coverage] Starting at waypoint, advancing if needed...")
-                # Will be handled in main loop
-
-        # Continue until path is complete (with safety timeout)
-        while not planner.is_complete() and t < max_coverage_time:
-            pose = robot.get_pose()
-            waypoint_data = planner.get_current_waypoint()
-
-            if not waypoint_data:
-                break
-
-            wx, wy, wtheta = waypoint_data
-            waypoint = (wx, wy)
-
-            dx = waypoint[0] - pose[0]
-            dy = waypoint[1] - pose[1]
-            dist = np.sqrt(dx * dx + dy * dy)
-
-            dtheta = wtheta - pose[2]
-            dtheta = ((dtheta + np.pi) % (2 * np.pi)) - np.pi
-            abs_dtheta = abs(dtheta)
-
-            POSITION_TOLERANCE = 0.05  # 5cm
-            ORIENTATION_TOLERANCE = np.deg2rad(8)  # 8 degrees
-
-            # Check if waypoint reached (position and orientation)
-            position_reached = dist < POSITION_TOLERANCE
-            orientation_reached = abs_dtheta < ORIENTATION_TOLERANCE
-
-            # Advance waypoint if both position and orientation are reached
-            if (
-                position_reached
-                and orientation_reached
-                and (t - last_advance_time) > 0.1
-            ):
-                planner.advance_waypoint()
-                last_advance_time = t
-
-                # Check if we've completed all waypoints
-                if planner.is_complete():
-                    break
-
-                # Skip control update this iteration since we advanced
-                continue
-
-            # Control logic: prioritize orientation when close to waypoint
-            if position_reached:
-                # At waypoint position - turn in place to match orientation
-                if not orientation_reached:
-                    v = 0.0  # Stop forward motion
-                    omega = 1.5 * dtheta  # Turn in place (smooth)
-                    omega = np.clip(omega, -1.5, 1.5)
-                else:
-                    # Both reached but not advanced yet (shouldn't happen, but safe)
-                    v = 0.0
-                    omega = 0.0
-            elif dist < 0.15:  # Approaching waypoint - start considering orientation
-                # Blend between pure pursuit and orientation correction
-                v_pp, omega_pp = pure_pursuit(pose, waypoint)
-
-                # Reduce forward speed if orientation error is large
-                orientation_factor = max(0.3, 1.0 - abs_dtheta / np.deg2rad(45))
-                v = v_pp * orientation_factor
-
-                # Blend angular velocities: pure pursuit + orientation correction
-                omega_orient = 1.0 * dtheta  # Orientation correction
-                omega = 0.5 * omega_pp + 0.5 * omega_orient
-                omega = np.clip(omega, -1.5, 1.5)
-            else:
-                # Far from waypoint - use pure pursuit
-                v, omega = pure_pursuit(pose, waypoint)
-
-            # Update robot
-            robot.update(v, omega, dt)
-
-            # Update swept map
-            if v > 0:
-                swept_map.add_forward_sweep(pose, v * dt)
-
-            # Update visualization every 5 steps - match viz_demo.py exactly
-            if viz is not None and int(t / dt) % 5 == 0:
-                coverage_grid = swept_map.get_grid()
-                bounds = (
-                    swept_map.min_x,
-                    swept_map.max_x,
-                    swept_map.min_y,
-                    swept_map.max_y,
-                )
-
-                # Get current lane index
-                current_lane_idx = planner.get_current_lane_index()
-                if current_lane_idx is None:
-                    current_lane_idx = 0
-                else:
-                    current_lane_idx += 1  # 1-indexed for display
-
-                status = f"Trial {trial_num} - Coverage Mode\n"
-                status += f"Time: {t:.1f}s\n"
-                status += f"Waypoint: {planner.current_waypoint_idx + 1}/{len(planner.path)}\n"
-                status += f"Lane: {current_lane_idx}/{len(lanes)}\n"
-                status += f"Coverage: {swept_map.coverage_ratio(rectangle):.1%}"
-
-                # Get inset rectangle for coverage area visualization
-                coverage_area_rect = planner.get_inset_rectangle()
-
-                viz.update(
-                    poses=robot.trajectory,
-                    edge_points=rect_fit.edge_points,
-                    rectangle=rectangle,
-                    coverage_grid=coverage_grid,
-                    swept_map_bounds=bounds,
-                    text_info=status,
-                    robot_state="COVERAGE",
-                    ground_truth_bounds=(
-                        table.min_x,
-                        table.max_x,
-                        table.min_y,
-                        table.max_y,
-                    ),
-                    coverage_lanes=lanes,
-                    coverage_area_rect=coverage_area_rect,
-                )
-
-            t += dt
-
+        
         coverage_time_real = time.time() - t_coverage_start
-        coverage_sim_time = t
-        coverage_success = planner.is_complete()
 
         if verbose:
             print(
                 f"  Coverage: {coverage_sim_time:.1f}s (wall time: {coverage_time_real:.2f}s)"
             )
             print(f"  Complete: {coverage_success}")
-
-        # Final visualization update for coverage phase
-        if viz is not None:
-            coverage_ratio = swept_map.coverage_ratio(rectangle)
-            coverage_area_rect = planner.get_inset_rectangle()
-
-            viz.update(
-                poses=robot.trajectory,
-                edge_points=rect_fit.edge_points,
-                rectangle=rectangle,
-                coverage_grid=swept_map.get_grid(),
-                swept_map_bounds=(
-                    swept_map.min_x,
-                    swept_map.max_x,
-                    swept_map.min_y,
-                    swept_map.max_y,
-                ),
-                text_info=f"Trial {trial_num} - Complete!\nCoverage: {coverage_ratio:.1%}",
-                robot_state="DONE",
-                ground_truth_bounds=(
-                    table.min_x,
-                    table.max_x,
-                    table.min_y,
-                    table.max_y,
-                ),
-                coverage_area_rect=coverage_area_rect,
-            )
 
     # === Collect Metrics ===
     metrics = {}
@@ -477,6 +134,7 @@ def run_single_trial(
     metrics["edge_points"] = len(rect_fit.edge_points)
 
     # 2. Rectangle fitting error (%)
+    ground_truth = table.get_ground_truth_rect()
     metrics["rect_error_pct"] = calculate_rectangle_error(rectangle, ground_truth)
 
     # 3. Coverage % (full rectangle)

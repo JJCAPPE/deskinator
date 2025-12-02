@@ -186,17 +186,30 @@ def simulate_wall_following(
     speed_multiplier: float = SPEED_MULTIPLIER,
     viz: Optional[Visualizer] = None,
     swept_map: Optional[SweptMap] = None,
-):
+    verbose: bool = True,
+) -> Tuple[SimulatedRobot, SimpleWallFollower, SimpleRectangleFit, TableSimulator, Optional[Visualizer], SweptMap, float]:
     """Simulate wall-following algorithm.
 
     Args:
         speed_multiplier: Multiplier for all speeds (default: SPEED_MULTIPLIER)
         viz: Optional Visualizer instance to reuse (creates new if None)
         swept_map: Optional SweptMap instance to reuse (creates new if None)
+        verbose: Whether to print progress messages
+
+    Returns:
+        Tuple containing:
+        - robot: SimulatedRobot instance
+        - wall_follower: SimpleWallFollower instance
+        - rect_fit: SimpleRectangleFit instance
+        - table: TableSimulator instance
+        - viz: Visualizer instance (or None)
+        - swept_map: SweptMap instance
+        - sim_time: Total simulation time in seconds
     """
-    print("=" * 60)
-    print("Wall-Following Simulation")
-    print("=" * 60)
+    if verbose:
+        print("=" * 60)
+        print("Wall-Following Simulation")
+        print("=" * 60)
 
     # Create table
     table = TableSimulator(center=(0.0, 0.0), width=2.0, height=2.0, heading=0.0)
@@ -207,9 +220,12 @@ def simulate_wall_following(
     start_theta = np.random.uniform(0, 2 * np.pi)
     start_pose = (start_x, start_y, start_theta)
 
-    print(
-        f"Starting pose: ({start_x:.2f}, {start_y:.2f}, {np.rad2deg(start_theta):.1f}°)"
-    )
+    start_pose = (start_x, start_y, start_theta)
+
+    if verbose:
+        print(
+            f"Starting pose: ({start_x:.2f}, {start_y:.2f}, {np.rad2deg(start_theta):.1f}°)"
+        )
 
     # Create robot
     robot = SimulatedRobot(start_pose, table.get_bounds())
@@ -236,9 +252,10 @@ def simulate_wall_following(
     max_time = 300.0  # Safety timeout (5 minutes) - should not be reached with rotation-based completion
     t = 0.0
 
-    print("\nStarting simulation...")
-    print("Boundary discovery will complete after 360° of total rotation")
-    print("Press Ctrl+C to stop early")
+    if verbose:
+        print("\nStarting simulation...")
+        print("Boundary discovery will complete after 360° of total rotation")
+        print("Press Ctrl+C to stop early")
 
     try:
         while t < max_time and not wall_follower.is_complete():
@@ -316,22 +333,25 @@ def simulate_wall_following(
             t += dt
 
         total_rotation_deg = wall_follower.get_total_rotation_degrees()
-        print(f"\nWall-following complete after {t:.1f} seconds")
-        print(
-            f"Total rotation: {total_rotation_deg:.1f}° ({total_rotation_deg/360.0*100:.1f}% of full loop)"
-        )
-        print(f"Collected {len(rect_fit.edge_points)} edge points")
+        if verbose:
+            print(f"\nWall-following complete after {t:.1f} seconds")
+            print(
+                f"Total rotation: {total_rotation_deg:.1f}° ({total_rotation_deg/360.0*100:.1f}% of full loop)"
+            )
+            print(f"Collected {len(rect_fit.edge_points)} edge points")
 
         # Final rectangle fit
         rect_fit.fit()
         rectangle = rect_fit.get_rectangle()
 
         if rectangle:
-            print(f"Fitted rectangle: {rectangle[3]:.2f} x {rectangle[4]:.2f} m")
-            print(f"  Center: ({rectangle[0]:.2f}, {rectangle[1]:.2f})")
-            print(f"  Heading: {np.rad2deg(rectangle[2]):.1f}°")
+            if verbose:
+                print(f"Fitted rectangle: {rectangle[3]:.2f} x {rectangle[4]:.2f} m")
+                print(f"  Center: ({rectangle[0]:.2f}, {rectangle[1]:.2f})")
+                print(f"  Heading: {np.rad2deg(rectangle[2]):.1f}°")
         else:
-            print("Failed to fit rectangle")
+            if verbose:
+                print("Failed to fit rectangle")
 
         # Final visualization update
         coverage_grid = swept_map.get_grid()
@@ -355,11 +375,11 @@ def simulate_wall_following(
         # Wait a bit to see final state
         time.sleep(2.0)
 
-        return robot, wall_follower, rect_fit, table, viz, swept_map
+        return robot, wall_follower, rect_fit, table, viz, swept_map, t
 
     except KeyboardInterrupt:
         print("\nSimulation interrupted by user")
-        return robot, wall_follower, rect_fit, table, viz, swept_map
+        return robot, wall_follower, rect_fit, table, viz, swept_map, t
 
 
 def simulate_coverage(
@@ -369,7 +389,8 @@ def simulate_coverage(
     speed_multiplier: float = SPEED_MULTIPLIER,
     viz: Optional[Visualizer] = None,
     swept_map: Optional[SweptMap] = None,
-):
+    verbose: bool = True,
+) -> Tuple[bool, float, Optional[CoveragePlanner]]:
     """Simulate coverage phase with boustrophedon paths.
 
     Args:
@@ -379,17 +400,27 @@ def simulate_coverage(
         speed_multiplier: Multiplier for all speeds (default: SPEED_MULTIPLIER)
         viz: Optional Visualizer instance to reuse (creates new if None)
         swept_map: Optional SweptMap instance to reuse (creates new if None)
+        verbose: Whether to print progress messages
+
+    Returns:
+        Tuple containing:
+        - success: True if coverage completed successfully
+        - sim_time: Total simulation time in seconds
+        - planner: CoveragePlanner instance (or None if failed to start)
     """
-    print("\n" + "=" * 60)
-    print("Coverage Simulation")
-    print("=" * 60)
+    if verbose:
+        print("\n" + "=" * 60)
+        print("Coverage Simulation")
+        print("=" * 60)
 
     rectangle = rect_fit.get_rectangle()
     if not rectangle:
-        print("No rectangle available for coverage planning")
-        return
+        if verbose:
+            print("No rectangle available for coverage planning")
+        return False, 0.0, None
 
-    print(f"Planning coverage for rectangle: {rectangle[3]:.2f} x {rectangle[4]:.2f} m")
+    if verbose:
+        print(f"Planning coverage for rectangle: {rectangle[3]:.2f} x {rectangle[4]:.2f} m")
 
     # Create coverage planner
     planner = CoveragePlanner()
@@ -398,7 +429,8 @@ def simulate_coverage(
     # Pass current robot pose to optimize start point
     lanes = planner.build_lanes(start_pose=robot.get_pose())
 
-    print(f"Generated {len(lanes)} coverage lanes")
+    if verbose:
+        print(f"Generated {len(lanes)} coverage lanes")
 
     # Reuse or create swept map
     if swept_map is None:
@@ -538,38 +570,70 @@ def simulate_coverage(
 
                 # Check if we've completed all waypoints
                 if planner.is_complete():
-                    print(f"\n✓ Reached final waypoint! Path complete.")
+                    if verbose:
+                        print(f"\n✓ Reached final waypoint! Path complete.")
                     break
 
                 # Skip control update this iteration since we advanced
                 continue
 
             # Control logic: prioritize orientation when close to waypoint
-            if position_reached:
-                # At waypoint position - turn in place to match orientation
+            # Control logic: Drive-Then-Turn
+            # 1. If far from waypoint, drive towards it (heading = bearing)
+            # 2. If close to waypoint, turn to desired orientation (heading = wtheta)
+            
+            target_heading = wtheta
+            is_approach_phase = not position_reached
+            
+            if is_approach_phase:
+                # We are approaching the waypoint - target heading is the bearing to it
+                target_heading = np.arctan2(dy, dx)
+            
+            # Compute heading error relative to CURRENT target
+            heading_error = target_heading - pose[2]
+            heading_error = ((heading_error + np.pi) % (2*np.pi)) - np.pi
+            
+            if not is_approach_phase:
+                # ARRIVAL PHASE: We are at the position, now align to final orientation
                 if not orientation_reached:
                     v = 0.0  # Stop forward motion
-                    omega = 1.5 * dtheta  # Turn in place (smooth)
-                    omega = np.clip(omega, -1.5, 1.5)
+                    # Use higher gain and allow full omega range when v=0
+                    turn_gain = 3.0
+                    omega = turn_gain * heading_error
+                    omega_max_stationary = LIMS.OMEGA_MAX * 2.0
+                    omega = np.clip(omega, -omega_max_stationary, omega_max_stationary)
                 else:
-                    # Both reached but not advanced yet (shouldn't happen, but safe)
+                    # Both reached but not advanced yet
                     v = 0.0
                     omega = 0.0
-            elif dist < 0.15:  # Approaching waypoint - start considering orientation
-                # Blend between pure pursuit and orientation correction
-                v_pp, omega_pp = pure_pursuit(pose, waypoint)
-
-                # Reduce forward speed if orientation error is large
-                orientation_factor = max(0.3, 1.0 - abs_dtheta / np.deg2rad(45))
-                v = v_pp * orientation_factor
-
-                # Blend angular velocities: pure pursuit + orientation correction
-                omega_orient = 1.0 * dtheta  # Orientation correction
-                omega = 0.5 * omega_pp + 0.5 * omega_orient
-                omega = np.clip(omega, -1.5, 1.5)
             else:
-                # Far from waypoint - use pure pursuit
-                v, omega = pure_pursuit(pose, waypoint)
+                # APPROACH PHASE: Drive towards the waypoint
+                # Use better strategy: if heading error is large, turn in place first
+                turn_in_place_threshold = np.deg2rad(30)  # 30 degrees
+                
+                if abs(heading_error) > turn_in_place_threshold:
+                    # Large heading error - turn in place first
+                    v = 0.0
+                    turn_gain = 3.0
+                    omega = turn_gain * heading_error
+                    omega_max_stationary = LIMS.OMEGA_MAX * 2.0
+                    omega = np.clip(omega, -omega_max_stationary, omega_max_stationary)
+                else:
+                    # Small heading error - move forward with heading correction
+                    
+                    # Forward speed (reduce if heading error is large)
+                    forward_speed_base = LIMS.V_BASE * speed_multiplier
+                    # Scale speed based on heading error
+                    heading_scale = 1.0 - (abs(heading_error) / turn_in_place_threshold) * 0.5
+                    v = forward_speed_base * max(0.5, heading_scale)
+                    
+                    # If we are very close to waypoint, slow down further
+                    if dist < 0.1:
+                        v *= 0.5
+                    
+                    # Angular velocity to correct heading toward desired orientation
+                    omega = 2.0 * heading_error  # Proportional control
+                    omega = np.clip(omega, -LIMS.OMEGA_MAX * speed_multiplier, LIMS.OMEGA_MAX * speed_multiplier)
 
             # Update robot
             robot.update(v, omega, dt)
@@ -626,16 +690,19 @@ def simulate_coverage(
 
         # Check completion reason
         if planner.is_complete():
-            print(f"\n✓ Coverage path completed successfully after {t:.1f} seconds")
-            print(f"  Completed all {len(planner.path)} waypoints")
+            if verbose:
+                print(f"\n✓ Coverage path completed successfully after {t:.1f} seconds")
+                print(f"  Completed all {len(planner.path)} waypoints")
         else:
-            print(f"\n⚠ Coverage simulation stopped after {t:.1f} seconds (timeout)")
-            print(
-                f"  Completed {planner.current_waypoint_idx}/{len(planner.path)} waypoints"
-            )
+            if verbose:
+                print(f"\n⚠ Coverage simulation stopped after {t:.1f} seconds (timeout)")
+                print(
+                    f"  Completed {planner.current_waypoint_idx}/{len(planner.path)} waypoints"
+                )
 
         coverage_ratio = swept_map.coverage_ratio(rectangle)
-        print(f"Coverage ratio: {coverage_ratio:.1%}")
+        if verbose:
+            print(f"Coverage ratio: {coverage_ratio:.1%}")
 
         # Get inset rectangle for coverage area visualization
         coverage_area_rect = planner.get_inset_rectangle()
@@ -662,13 +729,18 @@ def simulate_coverage(
         time.sleep(3.0)
 
         # Save visualization
-        viz.save("viz_demo_output.png")
-        print("\nSaved visualization to viz_demo_output.png")
+        if verbose:
+            viz.save("viz_demo_output.png")
+            print("\nSaved visualization to viz_demo_output.png")
+
+        return planner.is_complete(), t, planner
 
     except KeyboardInterrupt:
         print("\nCoverage simulation interrupted")
+        return False, t, planner
     finally:
-        viz.close()
+        if verbose:
+            viz.close()
 
 
 def main(speed_multiplier: float = SPEED_MULTIPLIER):
@@ -694,7 +766,7 @@ def main(speed_multiplier: float = SPEED_MULTIPLIER):
     swept_map = SweptMap()
 
     # Phase 1: Wall following
-    robot, wall_follower, rect_fit, table, _, _ = simulate_wall_following(
+    robot, wall_follower, rect_fit, table, _, _, _ = simulate_wall_following(
         speed_multiplier, viz=viz, swept_map=swept_map
     )
 

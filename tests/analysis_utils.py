@@ -7,8 +7,12 @@ for the robot cleaning simulation.
 
 import numpy as np
 from typing import List, Tuple, Optional
-from shapely.geometry import Polygon
-from shapely.ops import unary_union
+try:
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    HAS_SHAPELY = True
+except ImportError:
+    HAS_SHAPELY = False
 
 
 def calculate_rectangle_error(
@@ -30,6 +34,10 @@ def calculate_rectangle_error(
     """
     if fitted_rect is None:
         return 100.0
+    
+    if not HAS_SHAPELY:
+        print("Warning: shapely not installed, cannot calculate rectangle error")
+        return 0.0
     
     # Create polygons for both rectangles
     def rect_to_polygon(cx, cy, heading, width, height):

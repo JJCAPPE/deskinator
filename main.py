@@ -684,9 +684,24 @@ class Deskinator:
                                             dtheta = wtheta - theta
                                             dtheta = ((dtheta + np.pi) % (2*np.pi)) - np.pi
                         
-                        if dist_to_waypoint < POSITION_TOLERANCE:
-                            # Position reached, check orientation
-                            if abs(dtheta) < ORIENTATION_TOLERANCE:
+                        # Drive-Then-Turn Logic
+                        # 1. If far from waypoint, drive towards it (heading = bearing)
+                        # 2. If close to waypoint, turn to desired orientation (heading = wtheta)
+                        
+                        target_heading = wtheta
+                        is_approach_phase = dist_to_waypoint > POSITION_TOLERANCE
+                        
+                        if is_approach_phase:
+                            # We are approaching the waypoint - target heading is the bearing to it
+                            target_heading = np.arctan2(dy, dx)
+                        
+                        # Compute heading error relative to CURRENT target
+                        heading_error = target_heading - theta
+                        heading_error = ((heading_error + np.pi) % (2*np.pi)) - np.pi
+                        
+                        if not is_approach_phase:
+                            # ARRIVAL PHASE: We are at the position, now align to final orientation
+                            if abs(heading_error) < ORIENTATION_TOLERANCE:
                                 # Both position and orientation reached, advance waypoint
                                 self.coverage_planner.advance_waypoint()
                                 if self.coverage_planner.is_complete():
@@ -697,31 +712,28 @@ class Deskinator:
                                 self.transition_start_pose = None
                             else:
                                 # Turn in place to reach desired orientation
-                                # ALLOW TOTAL ROTATIONAL FREEDOM WHEN STATIONARY
                                 # Use higher gain and allow full omega range when v=0
-                                turn_gain = 3.0  # Increased from 1.5 for faster convergence
-                                omega_cmd = turn_gain * dtheta
+                                turn_gain = 3.0
+                                omega_cmd = turn_gain * heading_error
                                 
-                                # When stationary, allow full rotational freedom (use config limit)
-                                # Don't clamp to -1.0, use actual OMEGA_MAX from config
-                                omega_max_stationary = LIMS.OMEGA_MAX * 2.0  # Allow 2x when stationary
+                                # When stationary, allow full rotational freedom
+                                omega_max_stationary = LIMS.OMEGA_MAX * 2.0
                                 omega_cmd = np.clip(omega_cmd, -omega_max_stationary, omega_max_stationary)
                                 v_cmd = 0.0  # No forward motion during turn
                         else:
-                            # Position not reached, move forward
+                            # APPROACH PHASE: Drive towards the waypoint
                             # Use better strategy: if heading error is large, turn in place first
                             turn_in_place_threshold = np.deg2rad(30)  # 30 degrees
                             
-                            if abs(dtheta) > turn_in_place_threshold:
-                                # Large heading error - turn in place first with full rotational freedom
+                            if abs(heading_error) > turn_in_place_threshold:
+                                # Large heading error - turn in place first
                                 turn_gain = 3.0
-                                omega_cmd = turn_gain * dtheta
+                                omega_cmd = turn_gain * heading_error
                                 omega_max_stationary = LIMS.OMEGA_MAX * 2.0
                                 omega_cmd = np.clip(omega_cmd, -omega_max_stationary, omega_max_stationary)
                                 v_cmd = 0.0  # Don't move forward until oriented
                             else:
                                 # Small heading error - move forward with heading correction
-                                heading_error = dtheta
                                 
                                 # Forward speed (reduce if heading error is large)
                                 forward_speed_base = 0.1  # m/s
