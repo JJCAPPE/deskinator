@@ -741,6 +741,9 @@ class CoveragePlanner:
             []
         )  # Complete path with orientations
         self.current_waypoint_idx = 0
+        self.lanes_vertical: Optional[bool] = (
+            None  # Store lane orientation for recalculation
+        )
 
     def set_rectangle(self, rect: Tuple[float, float, float, float, float]):
         """
@@ -869,28 +872,28 @@ class CoveragePlanner:
 
             for i, idx in enumerate(indices):
                 start, end = base_lanes[idx]
-                
+
                 # Determine direction for this lane (alternating)
                 # If reverse_direction is True, we flip the logic
                 # Standard: even indices (0, 2, ...) go start->end
                 #           odd indices (1, 3, ...) go end->start
-                
+
                 # However, "i" here is the index in the sequence of visitation
                 # So we just alternate based on i
-                
+
                 # Actually, to maintain the boustrophedon pattern correctly when reversing order,
                 # we need to be careful.
                 # Let's just define the direction based on the visitation index i.
-                
-                use_start_to_end = (i % 2 == 0)
+
+                use_start_to_end = i % 2 == 0
                 if reverse_direction:
                     use_start_to_end = not use_start_to_end
-                
+
                 if use_start_to_end:
                     lane = [(start[0], start[1]), (end[0], end[1])]
                 else:
                     lane = [(end[0], end[1]), (start[0], start[1])]
-                
+
                 variant_lanes.append(lane)
             return variant_lanes
 
@@ -905,7 +908,7 @@ class CoveragePlanner:
             # 2. Normal order, reversed direction (start at other end of first lane)
             # 3. Reversed order (start at last lane), normal direction
             # 4. Reversed order, reversed direction
-            
+
             variants = [
                 (False, False),
                 (False, True),
@@ -917,19 +920,22 @@ class CoveragePlanner:
                 candidate_lanes = create_lanes_variant(rev_order, rev_dir)
                 if not candidate_lanes:
                     continue
-                    
+
                 # Check distance to start of first lane
                 first_pt = np.array(candidate_lanes[0][0])
                 dist = np.linalg.norm(robot_pos - first_pt)
-                
+
                 if dist < min_dist:
                     min_dist = dist
                     best_lanes = candidate_lanes
-            
+
             self.lanes = best_lanes
         else:
             # Default behavior
             self.lanes = create_lanes_variant(False, False)
+
+        # Store lanes_vertical for use in recalculation
+        self.lanes_vertical = lanes_vertical
 
         # Build complete path with orientations and transitions
         self.path = self._build_path_with_transitions(
@@ -1043,6 +1049,103 @@ class CoveragePlanner:
         # This ensures is_complete() can properly detect completion
         if self.current_waypoint_idx < len(self.path):
             self.current_waypoint_idx += 1
+
+    def recalculate_path_from_pose(
+        self, current_pose: Tuple[float, float, float]
+    ) -> bool:
+        """
+        Recalculate the path from the current robot pose.
+
+        This is useful when the robot gets stuck during transitions or drifts
+        significantly from the planned path. It rebuilds the path starting from
+        the current position, finding the best waypoint to resume from.
+
+        Args:
+            current_pose: Current robot pose (x, y, theta)
+
+        Returns:
+            True if recalculation was successful, False otherwise
+        """
+        if not self.rectangle or not self.lanes:
+            return False
+
+        x, y, theta = current_pose
+        current_pos = np.array([x, y])
+
+        # Find the closest waypoint in the remaining path
+        min_dist = float("inf")
+        best_idx = self.current_waypoint_idx
+
+        # Check remaining waypoints
+        for idx in range(self.current_waypoint_idx, len(self.path)):
+            wx, wy, _ = self.path[idx]
+            waypoint_pos = np.array([wx, wy])
+            dist = np.linalg.norm(current_pos - waypoint_pos)
+
+            if dist < min_dist:
+                min_dist = dist
+                best_idx = idx
+
+        # Also check if we should skip ahead to a future waypoint
+        # If we're very close to a waypoint further ahead, use that instead
+        if min_dist < 0.10:  # Within 10cm of a waypoint
+            self.current_waypoint_idx = best_idx
+            print(
+                f"[Coverage] Recalculated: jumping to waypoint {best_idx} (distance: {min_dist:.3f}m)"
+            )
+            return True
+
+        # If we're far from all waypoints, try to find the best lane to resume from
+        # Find which lane we should be on based on current position
+        best_lane_idx = None
+        min_lane_dist = float("inf")
+
+        for lane_idx, lane in enumerate(self.lanes):
+            # Check distance to both endpoints of the lane
+            for endpoint in lane:
+                endpoint_pos = np.array(endpoint)
+                dist = np.linalg.norm(current_pos - endpoint_pos)
+                if dist < min_lane_dist:
+                    min_lane_dist = dist
+                    best_lane_idx = lane_idx
+
+        if best_lane_idx is not None and min_lane_dist < 0.15:  # Within 15cm of a lane
+            # Rebuild path starting from this lane
+            # Get rectangle heading
+            inset_rect = self.get_inset_rectangle()
+            if not inset_rect:
+                return False
+            cx, cy, heading, width, height = inset_rect
+
+            # Use stored lanes_vertical if available, otherwise recalculate
+            if self.lanes_vertical is None:
+                lanes_vertical = width > height
+            else:
+                lanes_vertical = self.lanes_vertical
+
+            # Rebuild path from the best lane
+            remaining_lanes = self.lanes[best_lane_idx:]
+            if remaining_lanes:
+                # Rebuild transitions for remaining lanes
+                new_path = self._build_path_with_transitions(
+                    remaining_lanes, heading, lanes_vertical
+                )
+
+                # Set path and reset to start of new path
+                self.path = new_path
+                self.current_waypoint_idx = 0
+                print(
+                    f"[Coverage] Recalculated: rebuilding path from lane {best_lane_idx}"
+                )
+                return True
+
+        # Fallback: just update current waypoint index to closest
+        if best_idx != self.current_waypoint_idx:
+            self.current_waypoint_idx = best_idx
+            print(f"[Coverage] Recalculated: adjusting waypoint index to {best_idx}")
+            return True
+
+        return False
 
     def get_current_lane_index(self) -> Optional[int]:
         """

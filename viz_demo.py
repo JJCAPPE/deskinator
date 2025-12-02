@@ -32,7 +32,7 @@ except ImportError:
     from config import GEOM, ALG, LIMS
 
 # Speed multiplier for simulation (1.0 = real-time, >1.0 = faster, <1.0 = slower)
-SPEED_MULTIPLIER = 1.0
+SPEED_MULTIPLIER = 2.0
 
 
 class SimulatedRobot:

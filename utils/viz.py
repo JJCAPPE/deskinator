@@ -94,12 +94,12 @@ class Visualizer:
 
         # Edges (using plot is faster than scatter for simple dots)
         (self.ln_edges,) = self.ax_map.plot(
-            [], [], "g.", markersize=3, label="Edges", alpha=0.6
+            [], [], "gx", markersize=8, markeredgewidth=1.5, label="Edges", alpha=0.8
         )
 
         # Tactile hits
         (self.ln_tactile,) = self.ax_map.plot(
-            [], [], "rx", markersize=8, markeredgewidth=2, label="Tactile"
+            [], [], "rx", markersize=8, markeredgewidth=2  # No label - unused in demo
         )
 
         # Loop constraints (LineCollection for speed)
@@ -109,7 +109,7 @@ class Visualizer:
             linestyles="--",
             linewidths=1.5,
             alpha=0.6,
-            label="Loop Closure",
+            # No label - unused in demo
         )
         self.ax_map.add_collection(self.lc_loops)
 

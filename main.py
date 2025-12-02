@@ -172,6 +172,11 @@ class Deskinator:
         self.tactile_hits = []  # Track where we bumped walls for viz
         self.last_progress_time = time.time()
         self.last_recovery_time = 0.0
+        
+        # Transition tracking for stuck detection
+        self.transition_start_time = None
+        self.transition_start_pose = None
+        self.last_transition_waypoint_idx = None
 
         # Timers
         self.sense_timer = LoopTimer("Sense")
@@ -468,7 +473,7 @@ class Deskinator:
                 if rect:
                     print(f"[Map] Rectangle confident: {rect[3]:.2f} x {rect[4]:.2f} m")
                     self.coverage_planner.set_rectangle(rect)
-                    lanes = self.coverage_planner.build_lanes()
+                    lanes = self.coverage_planner.build_lanes(start_pose=pose)
                     print(f"[Map] Generated {len(lanes)} coverage lanes")
 
             self.map_timer.stop()
@@ -597,7 +602,7 @@ class Deskinator:
                         if rect:
                             print(f"[Coverage] Building lanes (retry)...")
                             self.coverage_planner.set_rectangle(rect)
-                            lanes = self.coverage_planner.build_lanes()
+                            lanes = self.coverage_planner.build_lanes(start_pose=pose)
                             if lanes:
                                 print(
                                     f"[Coverage] Generated {len(lanes)} coverage lanes"
@@ -616,6 +621,22 @@ class Deskinator:
                     if waypoint:
                         wx, wy, wtheta = waypoint
                         x, y, theta = pose
+                        current_waypoint_idx = self.coverage_planner.current_waypoint_idx
+                        
+                        # Detect transition waypoints (indices 2, 3, 4 mod 5 after first lane)
+                        # Pattern: [lane0_start(0), lane0_end(1), turn_end(2), move_to_lane1(3), turn_start_lane1(4), ...]
+                        is_transition = False
+                        if current_waypoint_idx >= 2:
+                            remaining = current_waypoint_idx - 2
+                            cycle_pos = remaining % 5
+                            is_transition = cycle_pos < 3  # Positions 0, 1, 2 in cycle are transitions
+                        
+                        # Track transition state for stuck detection
+                        if current_waypoint_idx != self.last_transition_waypoint_idx:
+                            # New waypoint - reset transition tracking
+                            self.transition_start_time = time.time()
+                            self.transition_start_pose = pose
+                            self.last_transition_waypoint_idx = current_waypoint_idx
                         
                         # Check if position reached
                         dx = wx - x
@@ -627,7 +648,41 @@ class Deskinator:
                         dtheta = wtheta - theta
                         # Normalize to [-pi, pi]
                         dtheta = ((dtheta + np.pi) % (2*np.pi)) - np.pi
-                        ORIENTATION_TOLERANCE = np.deg2rad(5)  # 5 degrees
+                        
+                        # More forgiving orientation tolerance for transitions
+                        if is_transition:
+                            ORIENTATION_TOLERANCE = np.deg2rad(10)  # 10 degrees for transitions
+                        else:
+                            ORIENTATION_TOLERANCE = np.deg2rad(5)  # 5 degrees for lanes
+                        
+                        # Stuck detection for transitions
+                        TRANSITION_TIMEOUT = 5.0  # seconds
+                        if is_transition and self.transition_start_time:
+                            time_in_transition = time.time() - self.transition_start_time
+                            if time_in_transition > TRANSITION_TIMEOUT:
+                                # Check if we've made progress
+                                if self.transition_start_pose:
+                                    dx_progress = x - self.transition_start_pose[0]
+                                    dy_progress = y - self.transition_start_pose[1]
+                                    dist_progress = np.sqrt(dx_progress*dx_progress + dy_progress*dy_progress)
+                                    
+                                    # If stuck (no progress and still far from waypoint)
+                                    if dist_progress < 0.02 and dist_to_waypoint > POSITION_TOLERANCE * 2:
+                                        print(f"[Coverage] Transition stuck detected, recalculating path from current position")
+                                        # Recalculate path from current position
+                                        self.coverage_planner.recalculate_path_from_pose(pose)
+                                        # Reset tracking
+                                        self.transition_start_time = time.time()
+                                        self.transition_start_pose = pose
+                                        # Get new waypoint
+                                        waypoint = self.coverage_planner.get_current_waypoint()
+                                        if waypoint:
+                                            wx, wy, wtheta = waypoint
+                                            dx = wx - x
+                                            dy = wy - y
+                                            dist_to_waypoint = np.sqrt(dx*dx + dy*dy)
+                                            dtheta = wtheta - theta
+                                            dtheta = ((dtheta + np.pi) % (2*np.pi)) - np.pi
                         
                         if dist_to_waypoint < POSITION_TOLERANCE:
                             # Position reached, check orientation
@@ -637,26 +692,47 @@ class Deskinator:
                                 if self.coverage_planner.is_complete():
                                     print("[Coverage] All lanes complete")
                                 v_cmd, omega_cmd = 0.0, 0.0
+                                # Reset transition tracking
+                                self.transition_start_time = None
+                                self.transition_start_pose = None
                             else:
-                                # Turn in place to reach desired orientation (proportional control)
-                                turn_gain = 1.5  # Proportional gain
-                                omega_cmd = turn_gain * dtheta  # Proportional control (smoother)
-                                omega_cmd = np.clip(omega_cmd, -1.0, 1.0)  # Limit turn rate
+                                # Turn in place to reach desired orientation
+                                # ALLOW TOTAL ROTATIONAL FREEDOM WHEN STATIONARY
+                                # Use higher gain and allow full omega range when v=0
+                                turn_gain = 3.0  # Increased from 1.5 for faster convergence
+                                omega_cmd = turn_gain * dtheta
+                                
+                                # When stationary, allow full rotational freedom (use config limit)
+                                # Don't clamp to -1.0, use actual OMEGA_MAX from config
+                                omega_max_stationary = LIMS.OMEGA_MAX * 2.0  # Allow 2x when stationary
+                                omega_cmd = np.clip(omega_cmd, -omega_max_stationary, omega_max_stationary)
                                 v_cmd = 0.0  # No forward motion during turn
                         else:
                             # Position not reached, move forward
-                            # Follow the desired orientation from the waypoint
-                            # This ensures we follow lane direction when in lanes,
-                            # and transition direction when moving between lanes
-                            heading_error = dtheta
+                            # Use better strategy: if heading error is large, turn in place first
+                            turn_in_place_threshold = np.deg2rad(30)  # 30 degrees
                             
-                            # Forward speed
-                            forward_speed = 0.1  # m/s
-                            v_cmd = forward_speed
-                            
-                            # Angular velocity to correct heading toward desired orientation
-                            omega_cmd = 2.0 * heading_error  # Proportional control
-                            omega_cmd = np.clip(omega_cmd, -1.0, 1.0)  # Limit turn rate
+                            if abs(dtheta) > turn_in_place_threshold:
+                                # Large heading error - turn in place first with full rotational freedom
+                                turn_gain = 3.0
+                                omega_cmd = turn_gain * dtheta
+                                omega_max_stationary = LIMS.OMEGA_MAX * 2.0
+                                omega_cmd = np.clip(omega_cmd, -omega_max_stationary, omega_max_stationary)
+                                v_cmd = 0.0  # Don't move forward until oriented
+                            else:
+                                # Small heading error - move forward with heading correction
+                                heading_error = dtheta
+                                
+                                # Forward speed (reduce if heading error is large)
+                                forward_speed_base = 0.1  # m/s
+                                # Scale speed based on heading error
+                                heading_scale = 1.0 - (abs(heading_error) / turn_in_place_threshold) * 0.5
+                                forward_speed = forward_speed_base * max(0.5, heading_scale)
+                                v_cmd = forward_speed
+                                
+                                # Angular velocity to correct heading toward desired orientation
+                                omega_cmd = 2.0 * heading_error  # Proportional control
+                                omega_cmd = np.clip(omega_cmd, -LIMS.OMEGA_MAX, LIMS.OMEGA_MAX)
                     else:
                         # No more waypoints available
                         v_cmd, omega_cmd = 0.0, 0.0
