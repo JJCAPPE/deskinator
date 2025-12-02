@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """Simple standalone test to exercise the drive motors via the Adafruit HAT."""
 
+import sys
 import time
 from math import isclose
+from pathlib import Path
+
+# Add parent directory to path for imports when running from tests/
+parent_dir = Path(__file__).parent.parent
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
 
 from config import LIMS
 from hw.stepper import StepperDrive

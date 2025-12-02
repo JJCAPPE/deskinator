@@ -24,17 +24,17 @@ import sys
 import termios
 import time
 import tty
+from pathlib import Path
 from select import select
 from typing import Optional
 
-try:
-    from hw.stepper import StepperDrive
-    from config import GEOM, LIMS
-except ImportError as exc:
-    raise SystemExit(
-        "Failed to import required modules. Make sure you're running from "
-        "the project root directory."
-    ) from exc
+# Add parent directory to path for imports when running from tests/
+parent_dir = Path(__file__).parent.parent
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
+
+from hw.stepper import StepperDrive
+from config import GEOM, LIMS
 
 
 class RawTerminal:

@@ -4,6 +4,10 @@ scipy>=1.13
 networkx>=3.2
 smbus2>=0.4
 
+# Testing dependencies
+shapely>=2.0
+openpyxl>=3.1
+
 # Optional visualization dependencies
 matplotlib>=3.7
 pyqtgraph>=0.13

@@ -2,7 +2,14 @@
 """Test script to verify motor distance accuracy based on input distance."""
 
 import argparse
+import sys
 import time
+from pathlib import Path
+
+# Add parent directory to path for imports when running from tests/
+parent_dir = Path(__file__).parent.parent
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
 
 from config import LIMS
 from hw.stepper import StepperDrive

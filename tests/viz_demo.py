@@ -9,30 +9,25 @@ import numpy as np
 import time
 from typing import List, Tuple, Optional
 
-try:
-    from planning.coverage import (
-        SimpleWallFollower,
-        SimpleRectangleFit,
-        CoveragePlanner,
-    )
-    from planning.map2d import SweptMap
-    from utils.viz import Visualizer
-    from config import GEOM, ALG, LIMS
-except ImportError:
-    import sys
+import sys
+from pathlib import Path
 
-    sys.path.insert(0, ".")
-    from planning.coverage import (
-        SimpleWallFollower,
-        SimpleRectangleFit,
-        CoveragePlanner,
-    )
-    from planning.map2d import SweptMap
-    from utils.viz import Visualizer
-    from config import GEOM, ALG, LIMS
+# Add parent directory to path for imports when running from tests/
+parent_dir = Path(__file__).parent.parent
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
+
+from planning.coverage import (
+    SimpleWallFollower,
+    SimpleRectangleFit,
+    CoveragePlanner,
+)
+from planning.map2d import SweptMap
+from utils.viz import Visualizer
+from config import GEOM, ALG, LIMS
 
 # Speed multiplier for simulation (1.0 = real-time, >1.0 = faster, <1.0 = slower)
-SPEED_MULTIPLIER = 2.0
+SPEED_MULTIPLIER = 1.0
 
 
 class SimulatedRobot:

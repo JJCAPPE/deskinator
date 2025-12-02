@@ -776,7 +776,7 @@ class CoveragePlanner:
         # Inset distance: distance from wheelbase to vacuum position when sensors are at edge
         # vacuum_offset = SENSOR_FWD + SENSOR_TO_VAC
         # This is the distance from wheelbase to vacuum when sensors are at edge
-        vacuum_offset = GEOM.SENSOR_FWD + GEOM.SENSOR_TO_VAC
+        vacuum_offset = GEOM.SENSOR_FWD + GEOM.SENSOR_TO_VAC - GEOM.RECT_INSET_OFFSET
 
         # Inset from each side (reduce width and height by 2 * inset)
         # Use abs() since SENSOR_TO_VAC is negative (vacuum behind sensors)

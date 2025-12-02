@@ -12,7 +12,17 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from pathlib import Path
 from typing import Optional
+
+# Add parent directory to path for imports when running from tests/
+parent_dir = Path(__file__).parent.parent
+if str(parent_dir) not in sys.path:
+    sys.path.insert(0, str(parent_dir))
+# Add tests directory to path for local imports
+tests_dir = Path(__file__).parent
+if str(tests_dir) not in sys.path:
+    sys.path.insert(0, str(tests_dir))
 
 # Attempt to import Qt (prefer PyQt5 to match proximity_viewer, but handle both)
 try:

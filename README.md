@@ -89,7 +89,7 @@ Parses `--viz`, `--calibrate`, and `--scan-i2c` flags and invokes Deskinator.
 
 ---
 
-# proximity_viewer.py  
+# tests/proximity_viewer.py  
 Minimal PyQtGraph GUI to display normalized proximity from front APDS9960 sensors and one start-gesture sensor.  
 
 ## class ProximityRig  
@@ -109,7 +109,7 @@ Parses CLI args for I²C addresses, bus numbers, and calibration.
 
 ---
 
-# pose_viewer.py  
+# tests/pose_viewer.py  
 Lightweight PyQtGraph tool that tails the latest `telemetry_*.csv` and plots 2D trajectory and edge events.  
 
 ## TelemetryTail  
@@ -360,26 +360,32 @@ Supervises high-level robot phases: WAIT_START → BOUNDARY_DISCOVERY → COVERA
 
 # Entry-point Scripts  
 
-### distance_test.py  
+### tests/distance_test.py  
 Benchmarks motor distance accuracy by commanding a distance and measuring actual travel.  
 
-### test_hardware.py  
-Comprehensive wiring test covering I²C buses, proximity sensors, IMU, steppers, buzzer, and gesture sensor. May include multiplexer tests for legacy setups.  
-
-### scan_i2c.py  
-Scans I²C buses and suggests updated `config.py` values. Supports both multiplexer-based and separate-bus configurations.  
-
-### manual_stepper_control.py  
-Interactive WASD-based jog utility for Adafruit MotorKit steppers via keyboard.  
-
-### fan_test.py  
-Runs vacuum fan at full power for manual verification.  
-
-### buzzer_test.py  
-Plays various beep patterns to confirm buzzer functionality.  
-
-### motor_test.py  
+### tests/motor_test.py  
 Sequences drive commands to test stepper motors and limits.  
+
+### tests/manual_stepper_control.py  
+Interactive control utility combining manual stepper control with live sensor visualization.  
+
+### tests/calibrate_wheels.py  
+Wheel direction calibration utility for A4988 stepper drivers.  
+
+### tests/buzz_on_space.py  
+Simple buzzer test that beeps when spacebar is pressed.  
+
+### tests/robot_testing.py  
+Robot performance testing framework that runs multiple trials and exports results to Excel. See `tests/TESTING.md` for details.  
+
+### tests/pose_viewer.py  
+Lightweight PyQtGraph viewer for pose telemetry logs.  
+
+### tests/proximity_viewer.py  
+Minimal live viewer for proximity sensors and IMU data.  
+
+### tests/viz_demo.py  
+Visualization demo for wall-following and coverage algorithm simulation.  
 
 ---
 
