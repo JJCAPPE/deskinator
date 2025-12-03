@@ -220,7 +220,6 @@ class DeskinatorSimple:
             return None
         
         try:
-            return self.gesture_sensor.read_proximity()
             return self.gesture_sensor.read_proximity_raw()
         except Exception as e:
             print(f"[Gesture] Read error: {e}")

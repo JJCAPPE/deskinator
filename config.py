@@ -113,8 +113,19 @@ class Algo:
     RECOVERY_TURN_ANGLE: float = 0.5  # rad turn away during recovery
 
 
+@dataclass
+class EKFParams:
+    """EKF sensor fusion parameters."""
+
+    Q_X: float = 0.0005  # Process noise: x position
+    Q_Y: float = 0.0005  # Process noise: y position
+    Q_THETA: float = 0.01  # Process noise: heading
+    R_GYRO: float = 0.001  # Measurement noise: IMU gyro
+
+
 PINS = Pins()
 I2C = I2CParams()
 GEOM = Geometry()
 LIMS = Limits()
 ALG = Algo()
+EKF = EKFParams()
