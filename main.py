@@ -24,6 +24,8 @@ try:
     from .utils.logs import TelemetryLogger
     from .utils.viz import Visualizer
     from .hw.table_detector import compute_sensor_world_position
+    from .hw.mpu6050 import MPU6050
+    from .slam.ekf_fusion import EKFFusion
 except ImportError:
     from config import PINS, I2C, GEOM, LIMS, ALG
     from hw.gpio import gpio_manager
@@ -37,6 +39,8 @@ except ImportError:
     from utils.logs import TelemetryLogger
     from utils.viz import Visualizer
     from hw.table_detector import compute_sensor_world_position
+    from hw.mpu6050 import MPU6050
+    from slam.ekf_fusion import EKFFusion
 
 
 class DeskinatorSimple:
@@ -49,11 +53,12 @@ class DeskinatorSimple:
     - Single-threaded synchronous loop
     """
 
-    def __init__(self, enable_viz: bool = False):
+    def __init__(self, enable_viz: bool = False, enable_imu: bool = False):
         """Initialize simplified Deskinator.
         
         Args:
             enable_viz: Enable real-time visualization
+            enable_imu: Enable IMU sensor fusion
         """
         print("=" * 60)
         print("Deskinator - Simplified Hardware Controller")
@@ -109,9 +114,26 @@ class DeskinatorSimple:
         except Exception as e:
             print(f"[Init] Warning: Gesture sensor unavailable ({e})")
 
+        # IMU (Optional)
+        self.imu = None
+        if enable_imu:
+            print("[Init] Initializing IMU...")
+            try:
+                imu_i2c = I2CBus(I2C.IMU_BUS)
+                self.imu = MPU6050(imu_i2c, I2C.ADDR_IMU)
+                print(f"  MPU-6050 IMU on bus {I2C.IMU_BUS} @ 0x{I2C.ADDR_IMU:02x}")
+            except Exception as e:
+                print(f"[Init] Warning: IMU unavailable ({e})")
+                self.imu = None
+
         # Simple pose tracking (replaces EKF)
-        print("[Init] Initializing simple odometry...")
-        self.odom = SimpleOdometry(initial_pose=(0.0, 0.0, 0.0))
+        # Simple pose tracking (replaces EKF)
+        if self.imu is not None:
+            print("[Init] Initializing EKF Fusion (IMU-aided)...")
+            self.odom = EKFFusion(initial_pose=(0.0, 0.0, 0.0))
+        else:
+            print("[Init] Initializing simple odometry...")
+            self.odom = SimpleOdometry(initial_pose=(0.0, 0.0, 0.0))
 
         # Control (same as viz_demo)
         print("[Init] Initializing control...")
@@ -161,6 +183,17 @@ class DeskinatorSimple:
 
         print("\n[Calibrate] Calibration complete")
 
+    def calibrate_imu(self):
+        """Calibrate IMU gyro bias."""
+        if self.imu is None:
+            print("[Calibrate] IMU not enabled or unavailable")
+            return
+
+        print("[Calibrate] Calibrating IMU...")
+        print("  Keep robot stationary for 3 seconds")
+        self.imu.bias_calibrate(duration=3.0)
+        print("[Calibrate] IMU calibration complete")
+
     def _notify_start_blink(self):
         """Play start notification on LED."""
         if self.led:
@@ -188,6 +221,7 @@ class DeskinatorSimple:
         
         try:
             return self.gesture_sensor.read_proximity()
+            return self.gesture_sensor.read_proximity_raw()
         except Exception as e:
             print(f"[Gesture] Read error: {e}")
             return None
@@ -519,6 +553,14 @@ class DeskinatorSimple:
                 dSL, dSR = self.stepper.update(dt)
                 self.odom.predict(dSL, dSR, dt)
 
+                # Update from IMU gyroscope if available
+                if self.imu is not None and hasattr(self.odom, 'update_gyro'):
+                    try:
+                        yaw_rate = self.imu.read_yaw_rate()
+                        self.odom.update_gyro(yaw_rate, dt)
+                    except Exception as e:
+                        print(f"[IMU] Read error: {e}")
+
                 # 8. Update swept map
                 if v_cmd > 0:
                     self.swept_map.add_forward_sweep(pose, v_cmd * dt)
@@ -624,13 +666,16 @@ def main():
     parser = argparse.ArgumentParser(description="Deskinator Simple Controller")
     parser.add_argument("--viz", action="store_true", help="Enable visualization")
     parser.add_argument("--calibrate", action="store_true", help="Run sensor calibration")
+    parser.add_argument("--imu", action="store_true", help="Enable IMU sensor fusion")
 
     args = parser.parse_args()
 
-    robot = DeskinatorSimple(enable_viz=args.viz)
+    robot = DeskinatorSimple(enable_viz=args.viz, enable_imu=args.imu)
 
     if args.calibrate:
         robot.calibrate_sensors()
+        if args.imu:
+            robot.calibrate_imu()
         return
 
     # Run main loop
