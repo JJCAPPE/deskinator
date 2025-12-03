@@ -59,7 +59,7 @@ class Geometry:
     VAC_WIDTH: float = 0.200  # m; effective cleaned width
     VAC_DEPTH: float = 0.14  # m; effective cleaned depth (14cm)
     SENSOR_TO_VAC: float = -0.07566  # m; vacuum behind sensors
-    RECT_INSET_OFFSET: float = -0.03  # m; offset secturity from edge to make it closer
+    RECT_INSET_OFFSET: float = -0.05  # m; offset secturity from edge to make it closer (negative = further away from edge)
 
 
 @dataclass
