@@ -172,3 +172,19 @@ class APDS9960:
             print("  WARNING: Small difference between on-table and off-table!")
             print(f"    Difference: {abs(on_table_mean - off_table_mean):.1f}")
             print("    This may make edge detection unreliable.")
+
+    def is_on_table(self) -> bool:
+        """Check if sensor detects table surface.
+        
+        This provides the same boolean interface as viz_demo.py's SimulatedRobot.read_sensors().
+        
+        Returns:
+            True if sensor is over table surface, False if off edge
+        """
+        try:
+            from ..config import ALG
+        except ImportError:
+            from config import ALG
+            
+        raw = self.read_proximity_raw()
+        return raw >= ALG.EDGE_RAW_THRESH

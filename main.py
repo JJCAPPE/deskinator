@@ -1,15 +1,15 @@
 """
-Main orchestration for Deskinator robot.
+Simplified Deskinator main controller for real hardware.
 
-Coordinates sensing, mapping, and control loops using asyncio.
+Replicates viz_demo.py's control architecture on real Raspberry Pi hardware.
+Uses simple odometry (no EKF) and proven simulation controllers.
 """
 
-import asyncio
 import time
 import signal
 import sys
-from typing import List, Tuple
 import numpy as np
+from typing import Optional
 
 try:
     from .config import PINS, I2C, GEOM, LIMS, ALG
@@ -19,20 +19,11 @@ try:
     from .hw.led import LED
     from .hw.i2c import I2CBus
     from .hw.apds9960 import APDS9960
-    from .hw.mpu6050 import MPU6050
-    from .slam.ekf import EKF
-    from .slam.posegraph import PoseGraph
-    from .slam.rect_fit import RectangleFit
-    from .slam.frames import transform_point
-    from .planning.coverage import CoveragePlanner
-    from .planning.map2d import SweptMap
-    from .control.fsm import SupervisorFSM, RobotState
-    from .control.motion import MotionController
-    from .control.wall_follower import WallFollower, WallState
-    from .control.limits import VelocityLimiter
+    from .slam.simple_odom import SimpleOdometry
+    from .planning import SimpleWallFollower, SimpleRectangleFit, CoveragePlanner, SweptMap
     from .utils.logs import TelemetryLogger
     from .utils.viz import Visualizer
-    from .utils.timing import RateTimer, LoopTimer
+    from .hw.table_detector import compute_sensor_world_position
 except ImportError:
     from config import PINS, I2C, GEOM, LIMS, ALG
     from hw.gpio import gpio_manager
@@ -41,41 +32,40 @@ except ImportError:
     from hw.led import LED
     from hw.i2c import I2CBus
     from hw.apds9960 import APDS9960
-    from hw.mpu6050 import MPU6050
-    from slam.ekf import EKF
-    from slam.posegraph import PoseGraph
-    from slam.rect_fit import RectangleFit
-    from slam.frames import transform_point
-    from planning.coverage import CoveragePlanner
-    from planning.map2d import SweptMap
-    from control.fsm import SupervisorFSM, RobotState
-    from control.motion import MotionController
-    from control.wall_follower import WallFollower, WallState
-    from control.limits import VelocityLimiter
+    from slam.simple_odom import SimpleOdometry
+    from planning import SimpleWallFollower, SimpleRectangleFit, CoveragePlanner, SweptMap
     from utils.logs import TelemetryLogger
     from utils.viz import Visualizer
-    from utils.timing import RateTimer, LoopTimer
+    from hw.table_detector import compute_sensor_world_position
 
 
-class Deskinator:
-    """Main robot controller."""
+class DeskinatorSimple:
+    """Simplified robot controller matching viz_demo.py architecture.
+    
+    Uses real hardware but simple control logic:
+    - Simple odometry (no EKF sensor fusion)
+    - SimpleWallFollower (same as simulation)
+    - Direct sensor boolean interface
+    - Single-threaded synchronous loop
+    """
 
     def __init__(self, enable_viz: bool = False):
-        """
-        Initialize Deskinator.
-
+        """Initialize simplified Deskinator.
+        
         Args:
             enable_viz: Enable real-time visualization
         """
         print("=" * 60)
-        print("Deskinator - Autonomous Desk Cleaning Robot")
+        print("Deskinator - Simplified Hardware Controller")
+        print("(Replicates viz_demo.py on real robot)")
         print("=" * 60)
 
-        # Hardware
+        # Hardware initialization
         print("[Init] Initializing hardware...")
         self.stepper = StepperDrive()
         self.vacuum = Vacuum()
 
+        # LED for status indication
         self.led = None
         try:
             self.led = LED()
@@ -83,132 +73,78 @@ class Deskinator:
         except Exception as e:
             print(f"[Init] Warning: LED unavailable ({e})")
 
-        self.gesture = None
-        try:
-            gesture_i2c = I2CBus(I2C.GESTURE_BUS)
-            self.gesture = APDS9960(gesture_i2c, I2C.GESTURE_ADDR)
-            self.gesture.init()
-            if getattr(self.gesture, "sim_mode", False):
-                print("  Gesture sensor in simulation mode")
-            else:
-                print(
-                    f"  Gesture APDS9960 on bus {I2C.GESTURE_BUS} @ 0x{I2C.GESTURE_ADDR:02x}"
-                )
-        except Exception as e:
-            print(f"[Init] Warning: Gesture sensor unavailable ({e})")
-
-        # I2C devices
-        # Proximity sensors on separate buses
+        # Proximity sensors (left and right)
         self.sensors = []
-
-        # Left sensor on bus 7 (GPIO19/GPIO26)
+        
+        # Left sensor on bus 7
         try:
             left_i2c = I2CBus(I2C.LEFT_SENSOR_BUS)
             left_sensor = APDS9960(left_i2c, I2C.APDS_ADDR)
             left_sensor.init()
             self.sensors.append(left_sensor)
-            print(
-                f"  Left APDS9960 on bus {I2C.LEFT_SENSOR_BUS} @ 0x{I2C.APDS_ADDR:02x}"
-            )
+            print(f"  Left APDS9960 on bus {I2C.LEFT_SENSOR_BUS} @ 0x{I2C.APDS_ADDR:02x}")
         except Exception as e:
             print(f"[Init] Warning: Left sensor unavailable ({e})")
             self.sensors.append(None)
 
-        # Right sensor on bus 1 (GPIO2/GPIO3 - hardware I2C)
+        # Right sensor on bus 3
         try:
             right_i2c = I2CBus(I2C.RIGHT_SENSOR_BUS)
             right_sensor = APDS9960(right_i2c, I2C.APDS_ADDR)
             right_sensor.init()
             self.sensors.append(right_sensor)
-            print(
-                f"  Right APDS9960 on bus {I2C.RIGHT_SENSOR_BUS} @ 0x{I2C.APDS_ADDR:02x}"
-            )
+            print(f"  Right APDS9960 on bus {I2C.RIGHT_SENSOR_BUS} @ 0x{I2C.APDS_ADDR:02x}")
         except Exception as e:
             print(f"[Init] Warning: Right sensor unavailable ({e})")
             self.sensors.append(None)
 
-        # IMU on separate bus (bus 5 - software I2C)
-        self.imu_i2c = I2CBus(I2C.IMU_BUS)
-        self.imu = MPU6050(self.imu_i2c, I2C.ADDR_IMU or 0x68)
-        if getattr(self.imu, "sim_mode", False):
-            print("  MPU-6050 IMU in simulation mode")
-        else:
-            print("  MPU-6050 IMU initialized")
+        # Gesture sensor for start/stop control
+        self.gesture_sensor = None
+        try:
+            gesture_i2c = I2CBus(I2C.GESTURE_BUS)
+            gesture_sensor = APDS9960(gesture_i2c, I2C.GESTURE_ADDR)
+            gesture_sensor.init()
+            self.gesture_sensor = gesture_sensor
+            print(f"  Gesture APDS9960 on bus {I2C.GESTURE_BUS} @ 0x{I2C.GESTURE_ADDR:02x}")
+        except Exception as e:
+            print(f"[Init] Warning: Gesture sensor unavailable ({e})")
 
-        # State estimation
-        print("[Init] Initializing SLAM...")
-        self.ekf = EKF()
-        self.pose_graph = PoseGraph()
-        self.rect_fit = RectangleFit()
+        # Simple pose tracking (replaces EKF)
+        print("[Init] Initializing simple odometry...")
+        self.odom = SimpleOdometry(initial_pose=(0.0, 0.0, 0.0))
 
-        # Planning
+        # Control (same as viz_demo)
+        print("[Init] Initializing control...")
+        self.wall_follower = SimpleWallFollower(
+            forward_speed=ALG.BOUNDARY_SPEED,
+            turn_speed=LIMS.OMEGA_MAX
+        )
+        
+        # Planning (same as viz_demo)
+        self.rect_fit = SimpleRectangleFit()
         self.coverage_planner = CoveragePlanner()
         self.swept_map = SweptMap()
-
-        # Control
-        print("[Init] Initializing control...")
-        self.fsm = SupervisorFSM()
-        self.motion = MotionController()
-        self.wall_follower = WallFollower()
-        self.limiter = VelocityLimiter()
 
         # Logging and visualization
         self.logger = TelemetryLogger()
         self.visualizer = Visualizer() if enable_viz else None
 
-        # State
+        # State tracking
         self.running = False
-        self.start_signal = False
-        self.finish_alerted = False
-        self.edge_filters = [1.0 for _ in self.sensors]
-        self.edge_drop_counts = {"left": 0, "right": 0}
-        self.edge_debounce_cycles = max(1, int(ALG.EDGE_DEBOUNCE * ALG.FUSE_HZ))
-        self.last_node_pose = (0.0, 0.0, 0.0)
-        self.sensor_context = {
-            "sensors": [],
-            "filtered": list(self.edge_filters),
-            "timestamp": time.time(),
-        }
-        self.tactile_hits = []  # Track where we bumped walls for viz
-        self.last_progress_time = time.time()
-        self.last_recovery_time = 0.0
+        self.state = "WAIT_START"  # WAIT_START, BOUNDARY_DISCOVERY, COVERAGE, DONE
+        self.trajectory = []
         
-        # Transition tracking for stuck detection
-        self.transition_start_time = None
-        self.transition_start_pose = None
-        self.last_transition_waypoint_idx = None
+        # Debouncing for edge detection
+        self.edge_drop_counts = {"left": 0, "right": 0}
+        self.edge_debounce_cycles = max(1, int(ALG.EDGE_DEBOUNCE * 50))  # 50 Hz loop
 
-        # Timers
-        self.sense_timer = LoopTimer("Sense")
-        self.map_timer = LoopTimer("Map")
-        self.ctrl_timer = LoopTimer("Control")
+        # Gesture sensor state for start/stop control
+        self.gesture_debounce_counter = 0
+        self.gesture_active_prev = False
+        self.cleaning_active = False  # True when cleaning is running
 
         print("[Init] Initialization complete")
         print("=" * 60)
-
-    def scan_i2c(self):
-        """Scan I2C buses and print devices."""
-        print("[I2C] Scanning buses...")
-
-        print(f"\n  Bus {I2C.LEFT_SENSOR_BUS} (Left sensor):")
-        try:
-            left_bus = I2CBus(I2C.LEFT_SENSOR_BUS)
-            devices = left_bus.scan()
-            print(f"    Found {len(devices)} device(s):")
-            for addr in devices:
-                print(f"      0x{addr:02x}")
-        except Exception as e:
-            print(f"    Error: {e}")
-
-        print(f"\n  Bus {I2C.RIGHT_SENSOR_BUS} (Right sensor):")
-        try:
-            right_bus = I2CBus(I2C.RIGHT_SENSOR_BUS)
-            devices = right_bus.scan()
-            print(f"    Found {len(devices)} device(s):")
-            for addr in devices:
-                print(f"      0x{addr:02x}")
-        except Exception as e:
-            print(f"    Error: {e}")
 
     def calibrate_sensors(self):
         """Calibrate proximity sensors."""
@@ -225,670 +161,422 @@ class Deskinator:
 
         print("\n[Calibrate] Calibration complete")
 
-    def calibrate_imu(self):
-        """Calibrate IMU bias."""
-        print("[Calibrate] Calibrating IMU...")
-        self.imu.bias_calibrate(duration=2.0)
-        print("[Calibrate] IMU calibration complete")
-
     def _notify_start_blink(self):
         """Play start notification on LED."""
-        if not self.led:
-            return
-
-        try:
-            self.led.blink_pattern(count=3, duration=0.1, pause=0.1)
-        except Exception as e:
-            print(f"[Start] LED error: {e}")
+        if self.led:
+            try:
+                self.led.blink_pattern(count=3, duration=0.1, pause=0.1)
+            except Exception as e:
+                print(f"[Start] LED error: {e}")
 
     def _notify_finish_blink(self):
-        """Play finish notification on LED asynchronously."""
-        if not self.led:
-            return
+        """Play finish notification on LED."""
+        if self.led:
+            try:
+                self.led.blink_pattern(count=5, duration=0.1, pause=0.1)
+            except Exception as e:
+                print(f"[Finish] LED error: {e}")
 
+    def _read_gesture_sensor(self) -> Optional[int]:
+        """Read gesture sensor raw proximity value.
+        
+        Returns:
+            Raw proximity value, or None if sensor unavailable
+        """
+        if self.gesture_sensor is None:
+            return None
+        
         try:
-            self.led.blink_async(count=2, duration=0.1, pause=0.1)
+            return self.gesture_sensor.read_proximity()
         except Exception as e:
-            print(f"[Shutdown] LED error: {e}")
+            print(f"[Gesture] Read error: {e}")
+            return None
 
-    def _await_gesture_start(self) -> bool:
-        """Block until a gesture is detected to start cleaning."""
-        self.start_signal = False
-        self.finish_alerted = False
-
-        if not self.gesture:
-            print("[Start] Gesture sensor unavailable; auto-starting")
-            self.start_signal = True
-            self._notify_start_blink()
+    def _check_gesture_toggle(self) -> bool:
+        """Check for gesture sensor toggle event.
+        
+        Returns:
+            True if gesture detected and state toggled
+        """
+        gesture_val = self._read_gesture_sensor()
+        
+        if gesture_val is None:
+            return False
+        
+        # Check threshold (same as manual_stepper_control.py)
+        is_active = gesture_val > ALG.GESTURE_RAW_THRESH
+        
+        # Debounce logic (same pattern as manual control)
+        if is_active:
+            self.gesture_debounce_counter += 1
+        else:
+            self.gesture_debounce_counter = 0
+            self.gesture_active_prev = False
+        
+        # Require ~3 frames of active (~150ms at 50Hz)
+        if self.gesture_debounce_counter > 2 and not self.gesture_active_prev:
+            # Toggle cleaning state
+            self.cleaning_active = not self.cleaning_active
+            print(f"[Gesture] Detected! Cleaning active: {self.cleaning_active}")
+            
+            # Latch to prevent multiple toggles while hand is held
+            self.gesture_active_prev = True
+            
+            # Blink LED on toggle
+            if self.cleaning_active:
+                self._notify_start_blink()
+            else:
+                self._notify_finish_blink()
+            
             return True
+        
+        return False
 
-        if getattr(self.gesture, "sim_mode", False):
-            print("[Start] Gesture sensor simulation mode; auto-starting")
-            self.start_signal = True
-            self._notify_start_blink()
-            return True
-
-        print("[Start] Hold your hand near the gesture sensor to begin...")
-
+    def _await_user_start(self) -> bool:
+        """Wait for user to start via gesture sensor."""
+        print("[Start] Wave hand over gesture sensor to begin cleaning...")
+        print("[Start] Press Ctrl+C to exit")
+        
         try:
-            while True:
-                raw_val = self.gesture.read_proximity_raw()
-                if raw_val > ALG.GESTURE_RAW_THRESH:
-                    print(f"[Start] Proximity trigger detected (raw={raw_val})")
-                    self.start_signal = True
-                    self._notify_start_blink()
-                    return True
-
-                time.sleep(0.1)
+            while not self.cleaning_active:
+                # Check gesture sensor
+                self._check_gesture_toggle()
+                time.sleep(0.02)  # 50Hz polling
+            
+            return True
         except KeyboardInterrupt:
-            print("\n[Start] Gesture wait cancelled by user")
+            print("\n[Start] Cancelled by user")
             return False
 
-    async def loop_sense(self):
-        """Sensing loop @ 50 Hz."""
-        rate = RateTimer(ALG.FUSE_HZ)
+    def _read_sensors(self) -> tuple:
+        """Read proximity sensors.
+        
+        Returns:
+            (left_on, right_on) - True if sensor detects table
+        """
+        left_on = True  # Default to on-table
+        right_on = True
+        
+        if self.sensors[0] is not None:
+            left_on = self.sensors[0].is_on_table()
+        
+        if self.sensors[1] is not None:
+            right_on = self.sensors[1].is_on_table()
+            
+        return left_on, right_on
 
-        while self.running:
-            self.sense_timer.start()
+    def _add_edge_point(self, pose: tuple, side: str):
+        """Add edge detection point to rectangle fitter.
+        
+        Args:
+            pose: Current robot pose (x, y, theta)
+            side: "left" or "right"
+        """
+        # Compute sensor position in world frame
+        world_x, world_y = compute_sensor_world_position(pose, side)
+        
+        # Add to rectangle fitter
+        self.rect_fit.add_edge_point((world_x, world_y))
+        
+        # Log
+        self.logger.log_edge(time.time(), (world_x, world_y), pose)
 
-            # Read odometry
-            dSL, dSR = self.stepper.read_odometry()
-            dt = 1.0 / ALG.FUSE_HZ
-
-            # Read IMU
-            yaw_rate = self.imu.read_yaw_rate()
-
-            # Update EKF
-            self.ekf.predict(dSL, dSR, dt)
-            self.ekf.update_gyro(yaw_rate, dt)
-
-            # Read proximity sensors (raw values for edge detection)
-            sensor_readings = []
-            for sensor in self.sensors:
-                if sensor is not None:
-                    reading = sensor.read_proximity_raw()
-                    sensor_readings.append(reading)
-                else:
-                    sensor_readings.append(
-                        255
-                    )  # Default to "on table" if sensor unavailable (high value)
-
-            # Check for edge events
-            self._check_edge_events(sensor_readings)
-
-            # Store sensor context
-            now = time.time()
-            self.sensor_context = {
-                "sensors": sensor_readings,
-                "filtered": list(self.edge_filters),
-                "timestamp": now,
-            }
-
-            self.sense_timer.stop()
-            await rate.sleep_async()
-
-    def _check_edge_events(self, sensors: List[int]):
-        """Check for edge detection events using raw proximity values."""
-        if not sensors:
-            return
-
-        # Edge threshold from config
-        EDGE_RAW_THRESHOLD = ALG.EDGE_RAW_THRESH
-
-        # Single sensor per side now
-        left_raw = (
-            sensors[I2C.LEFT_SENSOR_IDX] if I2C.LEFT_SENSOR_IDX < len(sensors) else 255
-        )
-        right_raw = (
-            sensors[I2C.RIGHT_SENSOR_IDX]
-            if I2C.RIGHT_SENSOR_IDX < len(sensors)
-            else 255
-        )
-
-        # Check if sensor is off table (raw value < threshold)
-        left_off = left_raw < EDGE_RAW_THRESHOLD
-        right_off = right_raw < EDGE_RAW_THRESHOLD
-
-        if left_off:
+    def _check_edge_events(self, left_on: bool, right_on: bool, pose: tuple):
+        """Check for edge detection and add points with debouncing.
+        
+        Args:
+            left_on: True if left sensor on table
+            right_on: True if right sensor on table
+            pose: Current robot pose
+        """
+        # Update drop counters
+        if not left_on:
             self.edge_drop_counts["left"] += 1
         else:
             self.edge_drop_counts["left"] = 0
 
-        if right_off:
+        if not right_on:
             self.edge_drop_counts["right"] += 1
         else:
             self.edge_drop_counts["right"] = 0
 
-        if not self.motion.edge_event_active:
-            # During BOUNDARY_DISCOVERY, wall follower handles edge events internally
-            # We still add edge points for rectangle fitting
-            is_wall_following = self.fsm.state == RobotState.BOUNDARY_DISCOVERY
+        # Trigger edge event after debounce cycles
+        if self.edge_drop_counts["left"] >= self.edge_debounce_cycles:
+            self.edge_drop_counts["left"] = 0
+            self._add_edge_point(pose, "left")
 
-            if self.edge_drop_counts["left"] >= self.edge_debounce_cycles:
-                self.edge_drop_counts["left"] = 0
-                if not is_wall_following:
-                    self.motion.handle_edge_event("left")
-                self._add_edge_points("left")
+        if self.edge_drop_counts["right"] >= self.edge_debounce_cycles:
+            self.edge_drop_counts["right"] = 0
+            self._add_edge_point(pose, "right")
 
-            if self.edge_drop_counts["right"] >= self.edge_debounce_cycles:
-                self.edge_drop_counts["right"] = 0
-                if not is_wall_following:
-                    self.motion.handle_edge_event("right")
-                self._add_edge_points("right")
+    def _drive_then_turn_controller(self, pose: tuple, waypoint: tuple) -> tuple:
+        """Drive-then-turn controller matching viz_demo.py logic.
+        
+        Args:
+            pose: Current pose (x, y, theta)
+            waypoint: Target waypoint (wx, wy, wtheta)
+            
+        Returns:
+            (v, omega) velocity commands
+        """
+        if waypoint is None:
+            return 0.0, 0.0
+            
+        x, y, theta = pose
+        wx, wy, wtheta = waypoint
 
-    def _add_edge_points(self, side: str):
-        """Add edge detection points to map."""
-        pose = self.ekf.pose()
+        # Compute position error
+        dx = wx - x
+        dy = wy - y
+        dist_to_waypoint = np.sqrt(dx*dx + dy*dy)
 
-        # Add point for the triggered sensor
-        if side == "left":
-            sensor_idx = I2C.LEFT_SENSOR_IDX
-        else:
-            sensor_idx = I2C.RIGHT_SENSOR_IDX
+        # Compute orientation error
+        dtheta = wtheta - theta
+        dtheta = ((dtheta + np.pi) % (2*np.pi)) - np.pi  # Wrap to [-pi, pi]
 
-        # Sensor position in robot frame
-        # Use first sensor lateral position for left, last for right
-        if sensor_idx < len(GEOM.SENSOR_LAT):
-            sensor_lat = GEOM.SENSOR_LAT[sensor_idx]
-        else:
-            # Fallback: use average of left/right positions
-            sensor_lat = GEOM.SENSOR_LAT[0] if side == "left" else GEOM.SENSOR_LAT[-1]
+        # Tolerances
+        POSITION_TOLERANCE = 0.05  # 5cm
+        ORIENTATION_TOLERANCE = np.deg2rad(8)  # 8 degrees
 
-        sensor_pos = (GEOM.SENSOR_FWD, sensor_lat)
+        # Check if reached
+        position_reached = dist_to_waypoint < POSITION_TOLERANCE
+        orientation_reached = abs(dtheta) < ORIENTATION_TOLERANCE
 
-        # Transform to world frame
-        world_pos = transform_point(pose, sensor_pos)
+        # Phase 1: Drive to position (if far)
+        if not position_reached:
+            # Target heading is bearing to waypoint
+            target_heading = np.arctan2(dy, dx)
+            heading_error = target_heading - theta
+            heading_error = ((heading_error + np.pi) % (2*np.pi)) - np.pi
 
-        # Add to rectangle fit
-        self.rect_fit.add_edge_point(world_pos)
+            # Turn in place threshold
+            turn_in_place_threshold = np.deg2rad(30)
 
-        # Log
-        self.logger.log_edge(time.time(), world_pos, pose)
-
-    async def loop_map(self):
-        """Mapping loop @ 20 Hz."""
-        rate = RateTimer(20)
-        optimize_counter = 0
-
-        while self.running:
-            self.map_timer.start()
-
-            pose = self.ekf.pose()
-
-            # Add pose graph nodes at regular intervals
-            dx = pose[0] - self.last_node_pose[0]
-            dy = pose[1] - self.last_node_pose[1]
-            dist = (dx * dx + dy * dy) ** 0.5
-
-            if dist >= ALG.NODE_SPACING:
-                # Optimization: Only add node if we are NOT performing a recovery/avoidance maneuver
-                # This prevents adding "messy" nodes when spinning in place or backing up
-                is_stable_motion = True
-                if self.fsm.state == RobotState.BOUNDARY_DISCOVERY:
-                    # In boundary mode, avoid adding nodes during the "AVOID" state of wall following
-                    if self.wall_follower.state == WallState.AVOID:
-                        is_stable_motion = False
-
-                # Also check general motion controller recovery
-                if (
-                    getattr(self.motion, "recovery_active", False)
-                    or self.motion.edge_event_active
-                ):
-                    is_stable_motion = False
-
-                if is_stable_motion:
-                    node_id = self.pose_graph.add_node(time.time(), pose)
-
-                    # Add odometry edge
-                    if node_id > 0:
-                        # Compute relative pose
-                        try:
-                            from .slam.frames import pose_difference
-                        except ImportError:
-                            from slam.frames import pose_difference
-
-                        z_ij = pose_difference(self.last_node_pose, pose)
-
-                        import numpy as np
-
-                        Info = np.diag([100.0, 100.0, 50.0])
-                        self.pose_graph.add_edge_odom(node_id - 1, node_id, z_ij, Info)
-
-                    self.last_node_pose = pose
-
-            # Optimize periodically
-            optimize_counter += 1
-            if optimize_counter >= 100:  # Every 5 seconds
-                self.pose_graph.optimize()
-                optimize_counter = 0
-
-            # Try rectangle fit (continuously update, but don't trigger state change yet)
-            self.rect_fit.fit()
-
-            # Note: State transition to COVERAGE is now handled in loop_ctrl
-            # when Wall Follower completes the lap.
-            if self.fsm.rectangle_confident and not self.coverage_planner.lanes:
-                # Only build lanes once when we become confident
-                rect = self.rect_fit.get_rectangle()
-                if rect:
-                    print(f"[Map] Rectangle confident: {rect[3]:.2f} x {rect[4]:.2f} m")
-                    self.coverage_planner.set_rectangle(rect)
-                    lanes = self.coverage_planner.build_lanes(start_pose=pose)
-                    print(f"[Map] Generated {len(lanes)} coverage lanes")
-
-            self.map_timer.stop()
-            await rate.sleep_async()
-
-    async def loop_ctrl(self):
-        """Control loop @ 50 Hz."""
-        rate = RateTimer(ALG.FUSE_HZ)
-        last_v, last_omega = 0.0, 0.0
-
-        while self.running:
-            self.ctrl_timer.start()
-
-            pose = self.ekf.pose()
-            dt = 1.0 / ALG.FUSE_HZ
-
-            # Handle edge events if active (but NOT during wall following - it handles edges internally)
-            if (
-                self.motion.edge_event_active
-                and self.fsm.state != RobotState.BOUNDARY_DISCOVERY
-            ):
-                # TACTILE LOCALIZATION: If we hit an edge during coverage, correct position
-                if (
-                    self.fsm.state == RobotState.COVERAGE
-                    and self.motion.edge_event_step == 0
-                ):
-                    # We just triggered the edge event. Snap to nearest wall.
-                    # Get current estimated heading
-                    curr_theta = pose[2]
-                    try:
-                        from .slam.frames import wrap_angle
-                    except ImportError:
-                        from slam.frames import wrap_angle
-                    import numpy as np
-
-                    # Assume table is aligned (0, 90, 180, 270)
-                    # Find closest cardinal direction
-                    # 0 = East (x max), 90 = North (y max), 180 = West (x min), -90 = South (y min)
-                    cardinals = [0, np.pi / 2, np.pi, -np.pi / 2]
-
-                    # Get rectangle bounds
-                    rect = self.rect_fit.get_rectangle()  # (cx, cy, heading, w, h)
-                    if rect:
-                        cx, cy, heading, w, h = rect
-                        # Assuming heading is small (~0) due to alignment
-                        min_x, max_x = cx - w / 2, cx + w / 2
-                        min_y, max_y = cy - h / 2, cy + h / 2
-
-                        walls = {
-                            0: (1.0, 0.0, -max_x),  # x - max_x = 0
-                            np.pi / 2: (0.0, 1.0, -max_y),  # y - max_y = 0
-                            np.pi: (1.0, 0.0, -min_x),  # x - min_x = 0
-                            -np.pi / 2: (0.0, 1.0, -min_y),  # y - min_y = 0
-                        }
-
-                        best_angle = min(
-                            cardinals, key=lambda x: abs(wrap_angle(curr_theta - x))
-                        )
-
-                        if abs(wrap_angle(curr_theta - best_angle)) < np.deg2rad(30):
-                            # Only correct if we hit head-on
-                            if best_angle in walls:
-                                line_params = walls[best_angle]
-                                print(
-                                    f"[Localize] Tactile update on wall angle {np.rad2deg(best_angle):.0f}"
-                                )
-                                self.ekf.update_line_constraint(line_params)
-                                self.tactile_hits.append((pose[0], pose[1]))
-                    else:
-                        # Fallback to swept map if rect not ready (shouldn't happen in COVERAGE)
-                        pass
-
-                v_cmd, omega_cmd = self.motion.update_edge_event(pose, dt)
-            elif getattr(self.motion, "recovery_active", False):
-                v_cmd, omega_cmd = self.motion.update_recovery(pose, dt)
+            if abs(heading_error) > turn_in_place_threshold:
+                # Large heading error - turn in place first
+                v = 0.0
+                omega = 3.0 * heading_error
+                omega = np.clip(omega, -LIMS.OMEGA_MAX * 2.0, LIMS.OMEGA_MAX * 2.0)
             else:
-                # Update FSM
-                context = {
-                    "start_signal": self.start_signal,
-                    "rectangle_confident": self.fsm.rectangle_confident,
-                    "coverage_ratio": (
-                        self.swept_map.coverage_ratio(self.rect_fit.get_rectangle())
-                        if self.rect_fit.is_confident
-                        else 0.0
-                    ),
-                    "coverage_planner_complete": self.coverage_planner.is_complete(),
-                    "error": False,
-                }
+                # Move forward with heading correction
+                forward_speed_base = LIMS.V_BASE
+                heading_scale = 1.0 - (abs(heading_error) / turn_in_place_threshold) * 0.5
+                v = forward_speed_base * max(0.5, heading_scale)
 
-                # DEBUG: Print FSM updates periodically or on change
-                old_state = self.fsm.state
-                state = self.fsm.update(context)
-                if old_state != state:
-                    print(f"[DEBUG] FSM Transition: {old_state} -> {state}")
+                # Slow down when close
+                if dist_to_waypoint < 0.1:
+                    v *= 0.5
 
-                if rate.last_time % 1.0 < 0.02:  # Print heartbeat every ~1s
-                    print(
-                        f"[DEBUG] Heartbeat: State={state.name}, Pose={pose}, StartSignal={self.start_signal}"
-                    )
+                # Angular velocity to correct heading
+                omega = 2.0 * heading_error
+                omega = np.clip(omega, -LIMS.OMEGA_MAX, LIMS.OMEGA_MAX)
 
-                # Generate motion commands based on state
-                if state == RobotState.WAIT_START:
-                    v_cmd, omega_cmd = 0.0, 0.0
+        # Phase 2: Turn to final orientation (if close)
+        elif not orientation_reached:
+            v = 0.0  # Stop forward motion
+            omega = 3.0 * dtheta
+            omega = np.clip(omega, -LIMS.OMEGA_MAX * 2.0, LIMS.OMEGA_MAX * 2.0)
+        else:
+            # Both reached
+            v = 0.0
+            omega = 0  
+            
+        return v, omega
 
-                elif state == RobotState.BOUNDARY_DISCOVERY:
-                    # Wall following with bump-and-correct (small 10° turns)
-                    v_cmd, omega_cmd = self.wall_follower.update(
-                        pose, self.sensor_context.get("sensors", [255, 255]), dt
-                    )
+    def run(self):
+        """Main control loop - single threaded like viz_demo."""
+        
+        # Setup signal handler
+        signal.signal(signal.SIGINT, self._signal_handler)
 
-                    # Check if wall follower completed a lap
-                    if self.wall_follower.state == WallState.DONE:
-                        print("[Main] Wall following lap complete!")
+        # Wait for start gesture
+        if not self._await_user_start():
+            self.shutdown()
+            return
 
-                        # Disable manual loop closure - relying on rectangle fit of raw points
-                        # if self.pose_graph.poses and self.wall_follower.lap_start_pose:
-                        #    ... (disabled) ...
-
-                        # Tell FSM we're done with boundary discovery
-                        self.fsm.rectangle_confident = True
-
-                elif state == RobotState.COVERAGE:
-                    # Ensure lanes are generated (retry if not yet built)
-                    if not self.coverage_planner.lanes:
-                        rect = self.rect_fit.get_rectangle()
-                        if rect:
-                            print(f"[Coverage] Building lanes (retry)...")
-                            self.coverage_planner.set_rectangle(rect)
-                            lanes = self.coverage_planner.build_lanes(start_pose=pose)
-                            if lanes:
-                                print(
-                                    f"[Coverage] Generated {len(lanes)} coverage lanes"
-                                )
-                            else:
-                                print(
-                                    f"[Coverage] Warning: No lanes generated (rect too small?)"
-                                )
-                        else:
-                            print(
-                                "[Coverage] Warning: No rectangle available for lane generation"
-                            )
-
-                    # Follow coverage path with orientation-aware waypoints
-                    waypoint = self.coverage_planner.get_current_waypoint()
-                    if waypoint:
-                        wx, wy, wtheta = waypoint
-                        x, y, theta = pose
-                        current_waypoint_idx = self.coverage_planner.current_waypoint_idx
-                        
-                        # Detect transition waypoints (indices 2, 3, 4 mod 5 after first lane)
-                        # Pattern: [lane0_start(0), lane0_end(1), turn_end(2), move_to_lane1(3), turn_start_lane1(4), ...]
-                        is_transition = False
-                        if current_waypoint_idx >= 2:
-                            remaining = current_waypoint_idx - 2
-                            cycle_pos = remaining % 5
-                            is_transition = cycle_pos < 3  # Positions 0, 1, 2 in cycle are transitions
-                        
-                        # Track transition state for stuck detection
-                        if current_waypoint_idx != self.last_transition_waypoint_idx:
-                            # New waypoint - reset transition tracking
-                            self.transition_start_time = time.time()
-                            self.transition_start_pose = pose
-                            self.last_transition_waypoint_idx = current_waypoint_idx
-                        
-                        # Check if position reached
-                        dx = wx - x
-                        dy = wy - y
-                        dist_to_waypoint = np.sqrt(dx*dx + dy*dy)
-                        POSITION_TOLERANCE = 0.05  # 5cm
-                        
-                        # Check if orientation reached
-                        dtheta = wtheta - theta
-                        # Normalize to [-pi, pi]
-                        dtheta = ((dtheta + np.pi) % (2*np.pi)) - np.pi
-                        
-                        # More forgiving orientation tolerance for transitions
-                        if is_transition:
-                            ORIENTATION_TOLERANCE = np.deg2rad(10)  # 10 degrees for transitions
-                        else:
-                            ORIENTATION_TOLERANCE = np.deg2rad(5)  # 5 degrees for lanes
-                        
-                        # Stuck detection for transitions
-                        TRANSITION_TIMEOUT = 5.0  # seconds
-                        if is_transition and self.transition_start_time:
-                            time_in_transition = time.time() - self.transition_start_time
-                            if time_in_transition > TRANSITION_TIMEOUT:
-                                # Check if we've made progress
-                                if self.transition_start_pose:
-                                    dx_progress = x - self.transition_start_pose[0]
-                                    dy_progress = y - self.transition_start_pose[1]
-                                    dist_progress = np.sqrt(dx_progress*dx_progress + dy_progress*dy_progress)
-                                    
-                                    # If stuck (no progress and still far from waypoint)
-                                    if dist_progress < 0.02 and dist_to_waypoint > POSITION_TOLERANCE * 2:
-                                        print(f"[Coverage] Transition stuck detected, recalculating path from current position")
-                                        # Recalculate path from current position
-                                        self.coverage_planner.recalculate_path_from_pose(pose)
-                                        # Reset tracking
-                                        self.transition_start_time = time.time()
-                                        self.transition_start_pose = pose
-                                        # Get new waypoint
-                                        waypoint = self.coverage_planner.get_current_waypoint()
-                                        if waypoint:
-                                            wx, wy, wtheta = waypoint
-                                            dx = wx - x
-                                            dy = wy - y
-                                            dist_to_waypoint = np.sqrt(dx*dx + dy*dy)
-                                            dtheta = wtheta - theta
-                                            dtheta = ((dtheta + np.pi) % (2*np.pi)) - np.pi
-                        
-                        # Drive-Then-Turn Logic
-                        # 1. If far from waypoint, drive towards it (heading = bearing)
-                        # 2. If close to waypoint, turn to desired orientation (heading = wtheta)
-                        
-                        target_heading = wtheta
-                        is_approach_phase = dist_to_waypoint > POSITION_TOLERANCE
-                        
-                        if is_approach_phase:
-                            # We are approaching the waypoint - target heading is the bearing to it
-                            target_heading = np.arctan2(dy, dx)
-                        
-                        # Compute heading error relative to CURRENT target
-                        heading_error = target_heading - theta
-                        heading_error = ((heading_error + np.pi) % (2*np.pi)) - np.pi
-                        
-                        if not is_approach_phase:
-                            # ARRIVAL PHASE: We are at the position, now align to final orientation
-                            if abs(heading_error) < ORIENTATION_TOLERANCE:
-                                # Both position and orientation reached, advance waypoint
-                                self.coverage_planner.advance_waypoint()
-                                if self.coverage_planner.is_complete():
-                                    print("[Coverage] All lanes complete")
-                                v_cmd, omega_cmd = 0.0, 0.0
-                                # Reset transition tracking
-                                self.transition_start_time = None
-                                self.transition_start_pose = None
-                            else:
-                                # Turn in place to reach desired orientation
-                                # Use higher gain and allow full omega range when v=0
-                                turn_gain = 3.0
-                                omega_cmd = turn_gain * heading_error
-                                
-                                # When stationary, allow full rotational freedom
-                                omega_max_stationary = LIMS.OMEGA_MAX * 2.0
-                                omega_cmd = np.clip(omega_cmd, -omega_max_stationary, omega_max_stationary)
-                                v_cmd = 0.0  # No forward motion during turn
-                        else:
-                            # APPROACH PHASE: Drive towards the waypoint
-                            # Use better strategy: if heading error is large, turn in place first
-                            turn_in_place_threshold = np.deg2rad(30)  # 30 degrees
-                            
-                            if abs(heading_error) > turn_in_place_threshold:
-                                # Large heading error - turn in place first
-                                turn_gain = 3.0
-                                omega_cmd = turn_gain * heading_error
-                                omega_max_stationary = LIMS.OMEGA_MAX * 2.0
-                                omega_cmd = np.clip(omega_cmd, -omega_max_stationary, omega_max_stationary)
-                                v_cmd = 0.0  # Don't move forward until oriented
-                            else:
-                                # Small heading error - move forward with heading correction
-                                
-                                # Forward speed (reduce if heading error is large)
-                                forward_speed_base = 0.1  # m/s
-                                # Scale speed based on heading error
-                                heading_scale = 1.0 - (abs(heading_error) / turn_in_place_threshold) * 0.5
-                                forward_speed = forward_speed_base * max(0.5, heading_scale)
-                                v_cmd = forward_speed
-                                
-                                # Angular velocity to correct heading toward desired orientation
-                                omega_cmd = 2.0 * heading_error  # Proportional control
-                                omega_cmd = np.clip(omega_cmd, -LIMS.OMEGA_MAX, LIMS.OMEGA_MAX)
-                    else:
-                        # No more waypoints available
-                        v_cmd, omega_cmd = 0.0, 0.0
-                        if self.coverage_planner.is_complete():
-                            print("[Coverage] Coverage planner reports complete")
-
-                elif state == RobotState.DONE:
-                    v_cmd, omega_cmd = 0.0, 0.0
-
-                else:
-                    v_cmd, omega_cmd = 0.0, 0.0
-
-            # Apply velocity limits
-            v_limited, omega_limited = self.limiter.limit(v_cmd, omega_cmd, dt)
-
-            # Command steppers
-            self.stepper.command(v_limited, omega_limited)
-            self.stepper.update(dt)
-
-            now = time.time()
-
-            # Update swept map (only for forward motion)
-            if v_limited > 0:
-                ds = v_limited * dt
-                self.swept_map.add_forward_sweep(pose, ds)
-                self.last_progress_time = now
-            elif abs(omega_limited) > 0.4:
-                self.last_progress_time = now
-
-            if (
-                self.fsm.is_active()
-                and not self.motion.edge_event_active
-                and not getattr(self.motion, "recovery_active", False)
-                and now - self.last_progress_time > ALG.WATCHDOG_TIMEOUT
-                and now - self.last_recovery_time > ALG.WATCHDOG_COOLDOWN
-            ):
-                print("[Watchdog] Recovery maneuver triggered")
-                self.motion.start_watchdog_recovery()
-                self.last_recovery_time = now
-
-            # Logging
-            self.logger.log_telemetry(
-                now,
-                pose,
-                (v_limited, omega_limited),
-                self.sensor_context.get("sensors", []),
-                self.motion.edge_event_active
-                or getattr(self.motion, "recovery_active", False),
-                self.fsm.get_state().name,
-            )
-
-            # Visualization
-            if self.visualizer:
-                poses = self.pose_graph.get_all_poses()
-                edge_points = self.rect_fit.edge_points
-                rectangle = self.rect_fit.get_rectangle()
-                coverage_grid = self.swept_map.get_grid()
-                bounds = (
-                    self.swept_map.min_x,
-                    self.swept_map.max_x,
-                    self.swept_map.min_y,
-                    self.swept_map.max_y,
-                )
-
-                # Update every 10th iteration to reduce overhead
-                if rate.last_time % 0.2 < 0.02:  # ~Every 0.2 seconds
-                    # Extract loop constraints for viz
-                    loop_constraints = []
-                    for i, j, _, _ in self.pose_graph.edges_loop:
-                        if i in self.pose_graph.poses and j in self.pose_graph.poses:
-                            p1 = self.pose_graph.poses[i]
-                            p2 = self.pose_graph.poses[j]
-                            loop_constraints.append(((p1[0], p1[1]), (p2[0], p2[1])))
-
-                    # Build status text
-                    cov_ratio = (
-                        self.swept_map.coverage_ratio(self.rect_fit.get_rectangle())
-                        if self.rect_fit.is_confident
-                        else 0.0
-                    )
-                    state_str = self.fsm.get_state().name
-                    status_text = f"Mode: {state_str}\nCoverage: {cov_ratio:.1%}"
-
-                    # Get coverage lanes for visualization
-                    coverage_lanes = (
-                        self.coverage_planner.lanes if self.coverage_planner.lanes else None
-                    )
-
-                    self.visualizer.update(
-                        poses,
-                        edge_points,
-                        rectangle,
-                        coverage_grid,
-                        bounds,
-                        loop_constraints=loop_constraints,
-                        text_info=status_text,
-                        robot_state=state_str,
-                        tactile_hits=self.tactile_hits,
-                        coverage_lanes=coverage_lanes,
-                    )
-
-            last_v, last_omega = v_limited, omega_limited
-
-            self.ctrl_timer.stop()
-            await rate.sleep_async()
-
-            # Check if done
-            if self.fsm.is_done():
-                if not self.finish_alerted:
-                    self._notify_finish_blink()
-                    self.finish_alerted = True
-                print("[Main] Mission complete!")
-                self.running = False
-
-    async def run_async(self):
-        """Run main control loops."""
-        self.running = True
-
-        # Turn on vacuum after gesture start
+        # Start vacuum
         print("[Main] Starting vacuum")
         self.vacuum.on(duty=0.8)
 
-        # Run loops concurrently
+        # Main loop parameters
+        dt = 0.02  # 50 Hz (20ms)
+        self.running = True
+        self.state = "BOUNDARY_DISCOVERY"
+        
+        print("[Main] Starting main loop...")
+        print("  State: BOUNDARY_DISCOVERY")
+        print("  Wave hand over gesture sensor to stop")
+
         try:
-            await asyncio.gather(self.loop_sense(), self.loop_map(), self.loop_ctrl())
+            t = 0.0
+            last_viz_update = 0.0
+            last_advance_time = -1.0  # For coverage waypoint debouncing
+
+            while self.running:
+                loop_start = time.time()
+
+                # 1. Check gesture sensor for stop command
+                if self._check_gesture_toggle():
+                    if not self.cleaning_active:
+                        print("[Main] Stop gesture detected")
+                        self.running = False
+                        break
+
+                # 2. Read sensors (hardware)
+                left_on, right_on = self._read_sensors()
+
+                # 3. Get current pose (simple odometry)
+                pose = self.odom.pose()
+                self.trajectory.append(pose)
+
+                # 4. Check for edge events (add points to rect_fit)
+                if self.state == "BOUNDARY_DISCOVERY":
+                    self._check_edge_events(left_on, right_on, pose)
+
+                # 5. State machine and control
+                v_cmd = 0.0
+                omega_cmd = 0.0
+
+                if self.state == "BOUNDARY_DISCOVERY":
+                    # Use SimpleWallFollower (same as viz_demo)
+                    v_cmd, omega_cmd = self.wall_follower.update(pose, left_on, right_on, dt)
+
+                    # Fit rectangle periodically
+                    if len(self.rect_fit.edge_points) > 4 and len(self.rect_fit.edge_points) % 5 == 0:
+                        self.rect_fit.fit()
+
+                    # Check completion (rotation-based)
+                    if self.wall_follower.is_complete():
+                        print(f"\n[Main] Wall following complete!")
+                        print(f"  Total rotation: {self.wall_follower.get_total_rotation_degrees():.1f}°")
+                        print(f"  Collected {len(self.rect_fit.edge_points)} edge points")
+
+                        # Final rectangle fit
+                        self.rect_fit.fit()
+                        rectangle = self.rect_fit.get_rectangle()
+
+                        if rectangle:
+                            cx, cy, heading, w, h = rectangle
+                            print(f"  Rectangle: {w:.2f} x {h:.2f} m at ({cx:.2f}, {cy:.2f})")
+                            
+                            # Transition to coverage
+                            print("[Main] Transitioning to COVERAGE")
+                            self.state = "COVERAGE"
+                            
+                            # Build coverage lanes
+                            self.coverage_planner.set_rectangle(rectangle)
+                            lanes = self.coverage_planner.build_lanes(start_pose=pose)
+                            print(f"  Generated {len(lanes)} coverage lanes")
+                        else:
+                            print("  ERROR: Failed to fit rectangle")
+                            self.state = "DONE"
+
+                elif self.state == "COVERAGE":
+                    # Get current waypoint
+                    waypoint = self.coverage_planner.get_current_waypoint()
+                    
+                    if waypoint:
+                        wx, wy, wtheta = waypoint
+                        x, y, theta = pose
+
+                        # Check if waypoint reached
+                        dx = wx - x
+                        dy = wy - y
+                        dist = np.sqrt(dx*dx + dy*dy)
+                        dtheta = wtheta - theta
+                        dtheta = ((dtheta + np.pi) % (2*np.pi)) - np.pi
+
+                        POSITION_TOLERANCE = 0.05
+                        ORIENTATION_TOLERANCE = np.deg2rad(8)
+
+                        if (dist < POSITION_TOLERANCE and 
+                            abs(dtheta) < ORIENTATION_TOLERANCE and
+                            (t - last_advance_time) > 0.1):
+                            
+                            self.coverage_planner.advance_waypoint()
+                            last_advance_time = t
+
+                            if self.coverage_planner.is_complete():
+                                print("\n[Main] Coverage complete!")
+                                self.state = "DONE"
+                        else:
+                            # Drive-then-turn controller
+                            v_cmd, omega_cmd = self._drive_then_turn_controller(pose, waypoint)
+                    else:
+                        v_cmd, omega_cmd = 0.0, 0.0
+                        if self.coverage_planner.is_complete():
+                            print("\n[Main] Coverage path complete")
+                            self.state = "DONE"
+
+                elif self.state == "DONE":
+                    v_cmd, omega_cmd = 0.0, 0.0
+                    self.running = False
+
+                # 6. Command motors (hardware)
+                self.stepper.command(v_cmd, omega_cmd)
+
+                # 7. Update odometry (hardware)
+                dSL, dSR = self.stepper.update(dt)
+                self.odom.predict(dSL, dSR, dt)
+
+                # 8. Update swept map
+                if v_cmd > 0:
+                    self.swept_map.add_forward_sweep(pose, v_cmd * dt)
+
+                # 9. Logging
+                self.logger.log_telemetry(
+                    time.time(),
+                    pose,
+                    (v_cmd, omega_cmd),
+                    [left_on, right_on],
+                    False,  # recovery_active
+                    self.state
+                )
+
+                # 10. Visualization (update at 5 Hz to reduce overhead)
+                if self.visualizer and (t - last_viz_update) > 0.2:
+                    coverage_grid = self.swept_map.get_grid()
+                    bounds = (
+                        self.swept_map.min_x,
+                        self.swept_map.max_x,
+                        self.swept_map.min_y,
+                        self.swept_map.max_y
+                    )
+                    rectangle = self.rect_fit.get_rectangle()
+                    
+                    # Build status text
+                    status = f"State: {self.state}\n"
+                    status += f"Time: {t:.1f}s\n"
+                    if self.state == "BOUNDARY_DISCOVERY":
+                        rotation = self.wall_follower.get_total_rotation_degrees()
+                        status += f"Rotation: {rotation:.1f}°\n"
+                        status += f"Edge points: {len(self.rect_fit.edge_points)}"
+                    elif self.state == "COVERAGE" and rectangle:
+                        cov_ratio = self.swept_map.coverage_ratio(rectangle)
+                        status += f"Coverage: {cov_ratio:.1%}\n"
+                        status += f"Waypoint: {self.coverage_planner.current_waypoint_idx + 1}/{len(self.coverage_planner.path)}"
+
+                    self.visualizer.update(
+                        poses=self.trajectory,
+                        edge_points=self.rect_fit.edge_points,
+                        rectangle=rectangle,
+                        coverage_grid=coverage_grid,
+                        swept_map_bounds=bounds,
+                        text_info=status,
+                        robot_state=self.state
+                    )
+                    last_viz_update = t
+
+                # 11. Sleep to maintain loop rate
+                elapsed = time.time() - loop_start
+                sleep_time = max(0, dt - elapsed)
+                time.sleep(sleep_time)
+                t += dt
+
         except KeyboardInterrupt:
             print("\n[Main] Interrupted by user")
         finally:
             self.shutdown()
-
-    def run(self):
-        """Run robot (blocking)."""
-        # Setup signal handler
-        signal.signal(signal.SIGINT, self._signal_handler)
-
-        print("[Main] Starting main loops...")
-        print("  Press Ctrl+C to stop")
-
-        if not self._await_gesture_start():
-            self.shutdown()
-            return
-
-        # Run async event loop
-        asyncio.run(self.run_async())
 
     def _signal_handler(self, signum, frame):
         """Handle interrupt signal."""
@@ -912,29 +600,18 @@ class Deskinator:
         # Close logs
         self.logger.close()
 
-        # Print timing stats
-        print("\n[Timing] Loop statistics:")
-        self.sense_timer.print_stats()
-        self.map_timer.print_stats()
-        self.ctrl_timer.print_stats()
-
         # Save visualization
         if self.visualizer:
-            self.visualizer.save("output_map.png")
+            self.visualizer.save("output_simple.png")
             self.visualizer.close()
 
-        # Cleanup peripherals
+        # LED cleanup
         if self.led:
+            self._notify_finish_blink()
+            time.sleep(0.5)
             self.led.cleanup()
 
-        # Close gesture sensor bus if wrapper exists
-        if self.gesture and hasattr(self.gesture, "bus_wrapper"):
-            try:
-                self.gesture.bus_wrapper.close()
-            except:
-                pass
-
-        # Cleanup GPIO
+        # GPIO cleanup
         gpio_manager.cleanup()
 
         print("[Shutdown] Complete")
@@ -944,21 +621,15 @@ def main():
     """Main entry point."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Deskinator Robot Controller")
+    parser = argparse.ArgumentParser(description="Deskinator Simple Controller")
     parser.add_argument("--viz", action="store_true", help="Enable visualization")
-    parser.add_argument("--calibrate", action="store_true", help="Run calibration")
-    parser.add_argument("--scan-i2c", action="store_true", help="Scan I2C bus")
+    parser.add_argument("--calibrate", action="store_true", help="Run sensor calibration")
 
     args = parser.parse_args()
 
-    robot = Deskinator(enable_viz=args.viz)
-
-    if args.scan_i2c:
-        robot.scan_i2c()
-        return
+    robot = DeskinatorSimple(enable_viz=args.viz)
 
     if args.calibrate:
-        robot.calibrate_imu()
         robot.calibrate_sensors()
         return
 
