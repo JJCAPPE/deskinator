@@ -207,7 +207,7 @@ def main():
     
     # 1. Rectangle fitting error
     plot_gaussian_distribution(
-        data['Rect Error (%)'],
+        data['Rect Error (ppm)'],
         'Rectangle Fitting Error (%)',
         output_dir / 'rect_error_distribution.png',
         bins=20

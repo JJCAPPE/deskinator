@@ -37,10 +37,10 @@ from analysis_utils import calculate_rectangle_error, calculate_trajectory_dista
 
 # Import viz_demo components for robot simulation
 from viz_demo import (
-    SimulatedRobot, 
-    TableSimulator, 
-    simulate_wall_following, 
-    simulate_coverage
+    SimulatedRobot,
+    TableSimulator,
+    simulate_wall_following,
+    simulate_coverage,
 )
 
 
@@ -72,19 +72,21 @@ def run_single_trial(
 
     # Create or reuse visualizer (passed from main)
     # If viz is None, we pass None to simulation functions (no visualization)
-    
+
     # Create swept map
     swept_map = SweptMap()
 
     # === PHASE 1: Boundary Discovery ===
     t_boundary_start = time.time()
-    
+
     # Run wall following simulation
-    robot, wall_follower, rect_fit, table, _, swept_map, boundary_sim_time = simulate_wall_following(
-        speed_multiplier=speed_multiplier,
-        viz=viz,
-        swept_map=swept_map,
-        verbose=verbose
+    robot, wall_follower, rect_fit, table, _, swept_map, boundary_sim_time = (
+        simulate_wall_following(
+            speed_multiplier=speed_multiplier,
+            viz=viz,
+            swept_map=swept_map,
+            verbose=verbose,
+        )
     )
 
     boundary_time = time.time() - t_boundary_start
@@ -107,7 +109,7 @@ def run_single_trial(
 
     if rectangle:
         t_coverage_start = time.time()
-        
+
         # Run coverage simulation
         coverage_success, coverage_sim_time, planner = simulate_coverage(
             robot=robot,
@@ -116,9 +118,9 @@ def run_single_trial(
             speed_multiplier=speed_multiplier,
             viz=viz,
             swept_map=swept_map,
-            verbose=verbose
+            verbose=verbose,
         )
-        
+
         coverage_time_real = time.time() - t_coverage_start
 
         if verbose:
@@ -170,7 +172,10 @@ def run_single_trial(
     if verbose:
         print(f"  Metrics collected:")
         print(f"    Edge points: {metrics['edge_points']}")
-        print(f"    Rect error: {metrics['rect_error_pct']:.2f}%")
+        # Display rect error: show ppm, and also percentage for reference
+        rect_error_ppm = metrics["rect_error_pct"]
+        rect_error_pct = rect_error_ppm / 10000.0  # Convert ppm to percentage
+        print(f"    Rect error: {rect_error_ppm:.2f} ppm ({rect_error_pct:.4f}%)")
         print(f"    Coverage (full): {metrics['coverage_full_pct']:.2f}%")
         print(f"    Coverage (inset): {metrics['coverage_inset_pct']:.2f}%")
         print(f"    Distance: {metrics['distance_m']:.2f}m")
@@ -204,7 +209,7 @@ def export_to_excel(results: List[Dict], output_path: str):
     headers = [
         "Trial",
         "Edge Points",
-        "Rect Error (%)",
+        "Rect Error (ppm)",
         "Coverage Full (%)",
         "Coverage Inset (%)",
         "Boundary Time (s)",
@@ -259,7 +264,7 @@ def export_to_excel(results: List[Dict], output_path: str):
     # Calculate statistics for each metric
     metric_names = [
         "Edge Points",
-        "Rect Error (%)",
+        "Rect Error (ppm)",
         "Coverage Full (%)",
         "Coverage Inset (%)",
         "Boundary Time (s)",
@@ -303,8 +308,8 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="robot_test_results.xlsx",
-        help="Output Excel file path (default: robot_test_results.xlsx)",
+        default="tests/results/robot_test_results.xlsx",
+        help="Output Excel file path (default: tests/results/robot_test_results.xlsx)",
     )
 
     parser.add_argument(
@@ -323,7 +328,8 @@ def main():
     parser.add_argument(
         "--no-viz",
         action="store_true",
-        help="Disable real-time visualization (enabled by default)",
+        default=False,
+        help="Disable real-time visualization (disabled by default)",
     )
 
     parser.add_argument(
@@ -389,7 +395,7 @@ def main():
 
     metric_keys = [
         ("Edge Points", "edge_points"),
-        ("Rect Error (%)", "rect_error_pct"),
+        ("Rect Error (ppm)", "rect_error_pct"),
         ("Coverage Full (%)", "coverage_full_pct"),
         ("Coverage Inset (%)", "coverage_inset_pct"),
         ("Boundary Time (s)", "boundary_time_s"),
@@ -402,7 +408,11 @@ def main():
         values = [r[key] for r in results]
         mean_val = np.mean(values)
         std_val = np.std(values)
-        print(f"{name:25s}: {mean_val:8.2f} ± {std_val:6.2f}")
+        # Use more decimal places for rect error (ppm)
+        if key == "rect_error_pct":
+            print(f"{name:25s}: {mean_val:10.2f} ± {std_val:8.2f}")
+        else:
+            print(f"{name:25s}: {mean_val:8.2f} ± {std_val:6.2f}")
 
     print("=" * 60)
 
