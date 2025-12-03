@@ -28,6 +28,8 @@ from config import GEOM, ALG, LIMS
 
 # Speed multiplier for simulation (1.0 = real-time, >1.0 = faster, <1.0 = slower)
 SPEED_MULTIPLIER = 1.0
+# Separate speed multiplier for coverage phase (can be faster to speed up demo)
+COVERAGE_SPEED_MULTIPLIER = 5.0  # 5x faster coverage
 
 
 class SimulatedRobot:
@@ -743,11 +745,12 @@ def simulate_coverage(
             viz.close()
 
 
-def main(speed_multiplier: float = SPEED_MULTIPLIER):
+def main(speed_multiplier: float = SPEED_MULTIPLIER, coverage_speed_multiplier: float = COVERAGE_SPEED_MULTIPLIER):
     """Main demo function.
 
     Args:
-        speed_multiplier: Multiplier for all speeds (default: SPEED_MULTIPLIER)
+        speed_multiplier: Multiplier for wall-following speed (default: SPEED_MULTIPLIER)
+        coverage_speed_multiplier: Multiplier for coverage speed (default: COVERAGE_SPEED_MULTIPLIER)
     """
     print("\n" + "=" * 60)
     print("Deskinator Visualization Demo")
@@ -757,8 +760,10 @@ def main(speed_multiplier: float = SPEED_MULTIPLIER):
     print("2. Rectangle fitting from edge points")
     print("3. Boustrophedon coverage path planning")
     print("4. Coverage execution")
-    if speed_multiplier != 1.0:
-        print(f"\nSpeed multiplier: {speed_multiplier}x")
+    if speed_multiplier != 1.0 or coverage_speed_multiplier != 1.0:
+        print(f"\nSpeed multipliers:")
+        print(f"  Wall-following: {speed_multiplier}x")
+        print(f"  Coverage: {coverage_speed_multiplier}x")
     print("\n" + "=" * 60)
 
     # Create shared visualizer and swept map for both phases
@@ -770,10 +775,10 @@ def main(speed_multiplier: float = SPEED_MULTIPLIER):
         speed_multiplier, viz=viz, swept_map=swept_map
     )
 
-    # Phase 2: Coverage
+    # Phase 2: Coverage (with separate speed multiplier)
     if rect_fit.get_rectangle():
         simulate_coverage(
-            robot, rect_fit, table, speed_multiplier, viz=viz, swept_map=swept_map
+            robot, rect_fit, table, coverage_speed_multiplier, viz=viz, swept_map=swept_map
         )
     else:
         print("\nSkipping coverage - no rectangle fitted")

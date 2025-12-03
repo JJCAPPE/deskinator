@@ -1020,7 +1020,73 @@ class CoveragePlanner:
             # This ensures we have a clear completion point
             path.append((last_end[0], last_end[1], final_heading))
 
+        # Add perimeter-following waypoints
+        if self.rectangle and lanes:
+            # Get inset rectangle for perimeter following
+            inset_rect = self.get_inset_rectangle()
+            if inset_rect:
+                cx, cy, heading, width, height = inset_rect
+                
+                # Calculate the four corners of the inset rectangle
+                # Corners in local frame (before rotation)
+                half_w, half_h = width / 2, height / 2
+                corners_local = [
+                    np.array([-half_w, -half_h]),  # Bottom-left
+                    np.array([half_w, -half_h]),   # Bottom-right
+                    np.array([half_w, half_h]),    # Top-right
+                    np.array([-half_w, half_h]),   # Top-left
+                ]
+                
+                # Rotation matrix to transform to world frame
+                c, s = np.cos(heading), np.sin(heading)
+                R = np.array([[c, -s], [s, c]])
+                
+                # Transform corners to world frame
+                center = np.array([cx, cy])
+                corners_world = [center + R @ corner_local for corner_local in corners_local]
+                
+                # Find the closest corner to the last lane endpoint
+                last_end_pos = np.array(last_end)
+                distances = [np.linalg.norm(corner - last_end_pos) for corner in corners_world]
+                start_corner_idx = np.argmin(distances)
+                
+                # Reorder corners to start from the closest one
+                ordered_corners = corners_world[start_corner_idx:] + corners_world[:start_corner_idx]
+                
+                # Add transition from last lane to first perimeter corner
+                first_corner = ordered_corners[0]
+                dx_to_corner = first_corner[0] - last_end[0]
+                dy_to_corner = first_corner[1] - last_end[1]
+                heading_to_corner = np.arctan2(dy_to_corner, dx_to_corner)
+                
+                # Turn to face first corner
+                path.append((last_end[0], last_end[1], heading_to_corner))
+                
+                # Move to first corner
+                path.append((first_corner[0], first_corner[1], heading_to_corner))
+                
+                # Follow the perimeter: visit each corner in order
+                for i in range(len(ordered_corners)):
+                    current_corner = ordered_corners[i]
+                    next_corner = ordered_corners[(i + 1) % len(ordered_corners)]
+                    
+                    # Calculate heading from current corner to next corner
+                    dx_edge = next_corner[0] - current_corner[0]
+                    dy_edge = next_corner[1] - current_corner[1]
+                    edge_heading = np.arctan2(dy_edge, dx_edge)
+                    
+                    # Turn to face the next corner (if not already at first corner)
+                    if i > 0:
+                        path.append((current_corner[0], current_corner[1], edge_heading))
+                    else:
+                        # For the first corner, we already moved there, now turn to face next corner
+                        path.append((current_corner[0], current_corner[1], edge_heading))
+                    
+                    # Move to next corner
+                    path.append((next_corner[0], next_corner[1], edge_heading))
+
         return path
+
 
     def get_current_lane(self) -> Optional[List[Tuple[float, float]]]:
         """
