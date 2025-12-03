@@ -1,56 +1,76 @@
-@startuml
-skinparam backgroundColor white
-
-start
-:Initialize Hardware, SLAM, & Control Systems;
-
-partition "State: WAIT_START" {
-  while (Gesture / Start Signal Detected?) is (No)
-    :Wait;
-  endwhile (Yes)
-}
-
-:Start Vacuum & Enter Boundary Discovery;
-
-partition "State: BOUNDARY_DISCOVERY" {
-  repeat
-    :Execute Wall Following (Follow Table Edge);
-    fork
-      :Update Pose Graph (Odom + IMU);
-    fork again
-      :Fit Rectangle to Edge Points;
-    end fork
-  repeat while (Lap Complete?) is (No)
-  
-  :Loop Closure: Match Start/End Node, Optimize Pose Graph, Sync EKF;
-}
-
-:Generate Coverage Lanes (Boustrophedon / Grid);
-
-partition "State: COVERAGE" {
-  :Enter Coverage Mode;
-  while (All Lanes Complete?) is (No)
-    :Follow Current Lane (Pure Pursuit);
+```mermaid
+flowchart TD
+    Start([Start])
+    Init[Initialize Hardware, SLAM, & Control Systems]
     
-    if (Table Edge Detected?) then (Yes)
-      partition "Tactile Localization" {
-        :Snap Heading/Pos to Cardinal Wall;
-        :Update EKF Constraints;
-      }
-      :Execute Recovery (Back up & Turn);
-    else (No)
-      if (Lane Complete?) then (Yes)
-        :Advance to Next Lane;
-      else (No)
-        :Continue Lane;
-      endif
-    endif
-  endwhile (Yes)
-}
-
-partition "State: DONE" {
-  :Stop Motors & Vacuum, Play Finish Sound;
-}
-
-stop
-@enduml
+    subgraph WAIT_START["State: WAIT_START"]
+        WaitCheck{Gesture / Start Signal Detected?}
+        Wait[Wait]
+        WaitCheck -->|No| Wait
+        Wait --> WaitCheck
+    end
+    
+    StartVacuum[Start Vacuum & Enter Boundary Discovery]
+    
+    subgraph BOUNDARY_DISCOVERY["State: BOUNDARY_DISCOVERY"]
+        WallFollow[Execute Wall Following Follow Table Edge]
+        UpdatePose[Update Pose Graph Odom + IMU]
+        FitRect[Fit Rectangle to Edge Points]
+        LapCheck{Lap Complete?}
+        LoopClosure[Loop Closure: Match Start/End Node, Optimize Pose Graph, Sync EKF]
+        
+        WallFollow --> UpdatePose
+        WallFollow --> FitRect
+        UpdatePose --> LapCheck
+        FitRect --> LapCheck
+        LapCheck -->|No| WallFollow
+        LapCheck -->|Yes| LoopClosure
+    end
+    
+    GenerateLanes[Generate Coverage Lanes Boustrophedon / Grid]
+    
+    subgraph COVERAGE["State: COVERAGE"]
+        EnterCoverage[Enter Coverage Mode]
+        AllLanesCheck{All Lanes Complete?}
+        FollowLane[Follow Current Lane Pure Pursuit]
+        EdgeDetected{Table Edge Detected?}
+        
+        subgraph TactileLocalization["Tactile Localization"]
+            SnapHeading[Snap Heading/Pos to Cardinal Wall]
+            UpdateEKF[Update EKF Constraints]
+            SnapHeading --> UpdateEKF
+        end
+        
+        Recovery[Execute Recovery Back up & Turn]
+        LaneComplete{Lane Complete?}
+        AdvanceLane[Advance to Next Lane]
+        ContinueLane[Continue Lane]
+        
+        EnterCoverage --> AllLanesCheck
+        AllLanesCheck -->|No| FollowLane
+        FollowLane --> EdgeDetected
+        EdgeDetected -->|Yes| SnapHeading
+        UpdateEKF --> Recovery
+        Recovery --> AllLanesCheck
+        EdgeDetected -->|No| LaneComplete
+        LaneComplete -->|Yes| AdvanceLane
+        LaneComplete -->|No| ContinueLane
+        AdvanceLane --> AllLanesCheck
+        ContinueLane --> AllLanesCheck
+    end
+    
+    subgraph DONE["State: DONE"]
+        Stop[Stop Motors & Vacuum, Play Finish Sound]
+    end
+    
+    StopNode([Stop])
+    
+    Start --> Init
+    Init --> WaitCheck
+    WaitCheck -->|Yes| StartVacuum
+    StartVacuum --> WallFollow
+    LoopClosure --> GenerateLanes
+    GenerateLanes --> EnterCoverage
+    AllLanesCheck -->|Yes| Stop
+    Stop --> StopNode
+```
