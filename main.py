@@ -156,9 +156,14 @@ class DeskinatorSimple:
         self.state = "WAIT_START"  # WAIT_START, BOUNDARY_DISCOVERY, COVERAGE, DONE
         self.trajectory = []
         
-        # Debouncing for edge detection
+        # Debouncing for edge detection (also reused for sensor hysteresis)
         self.edge_drop_counts = {"left": 0, "right": 0}
         self.edge_debounce_cycles = max(1, int(ALG.EDGE_DEBOUNCE * 50))  # 50 Hz loop
+        # Per-sensor filters for raw->boolean smoothing
+        self.sensor_filters = [
+            {"ewma": ALG.EDGE_RAW_THRESH, "state": True, "debounce": 0, "last_raw": ALG.EDGE_RAW_THRESH},
+            {"ewma": ALG.EDGE_RAW_THRESH, "state": True, "debounce": 0, "last_raw": ALG.EDGE_RAW_THRESH},
+        ]
 
         # Gesture sensor state for start/stop control
         self.gesture_debounce_counter = 0
@@ -275,11 +280,57 @@ class DeskinatorSimple:
                 # Check gesture sensor
                 self._check_gesture_toggle()
                 time.sleep(0.02)  # 50Hz polling
-            
+
             return True
         except KeyboardInterrupt:
             print("\n[Start] Cancelled by user")
             return False
+
+    def _filter_sensor(self, idx: int, raw_val: Optional[int]) -> bool:
+        """Convert raw sensor reading to stable boolean with EWMA + hysteresis + debounce."""
+        info = self.sensor_filters[idx]
+
+        # If no reading, assume safe/on-table
+        if raw_val is None:
+            info["debounce"] = 0
+            info["last_raw"] = None
+            return info["state"]
+
+        alpha = getattr(ALG, "EDGE_EWMA_ALPHA", 0.35)
+        hyst = getattr(ALG, "EDGE_RAW_HYST", 1.15)
+        off_thresh = ALG.EDGE_RAW_THRESH
+        on_thresh = off_thresh * hyst  # Require stronger return before clearing off-table
+
+        # EWMA filter to smooth flicker around threshold
+        ewma = alpha * raw_val + (1.0 - alpha) * info["ewma"]
+        info["ewma"] = ewma
+        info["last_raw"] = raw_val
+
+        state = info["state"]
+        debounce = info["debounce"]
+
+        if state:
+            # Currently on-table; flip only after sustained low readings
+            if ewma < off_thresh:
+                debounce += 1
+                if debounce >= self.edge_debounce_cycles:
+                    state = False
+                    debounce = 0
+            else:
+                debounce = 0
+        else:
+            # Currently off-table; require hysteresis + debounce to return to on-table
+            if ewma > on_thresh:
+                debounce += 1
+                if debounce >= self.edge_debounce_cycles:
+                    state = True
+                    debounce = 0
+            else:
+                debounce = 0
+
+        info["state"] = state
+        info["debounce"] = debounce
+        return state
 
     def _read_sensors(self) -> tuple:
         """Read proximity sensors.
@@ -287,15 +338,26 @@ class DeskinatorSimple:
         Returns:
             (left_on, right_on) - True if sensor detects table
         """
-        left_on = True  # Default to on-table
+        # Default to on-table (safe) if sensor unavailable
+        left_on = True
         right_on = True
-        
+
         if self.sensors[0] is not None:
-            left_on = self.sensors[0].is_on_table()
-        
+            try:
+                left_raw = self.sensors[0].read_proximity_raw()
+            except Exception as e:
+                print(f"[Sensor] Left read error: {e}")
+                left_raw = None
+            left_on = self._filter_sensor(0, left_raw)
+
         if self.sensors[1] is not None:
-            right_on = self.sensors[1].is_on_table()
-            
+            try:
+                right_raw = self.sensors[1].read_proximity_raw()
+            except Exception as e:
+                print(f"[Sensor] Right read error: {e}")
+                right_raw = None
+            right_on = self._filter_sensor(1, right_raw)
+
         return left_on, right_on
 
     def _add_edge_point(self, pose: tuple, side: str):

@@ -81,7 +81,7 @@ class Algo:
 
     FUSE_HZ: int = 50  # EKF update rate
     EDGE_THRESH: float = 0.5  # APDS off-table threshold (norm.)
-    EDGE_RAW_THRESH: int = 20  # APDS off-table raw threshold (raw < 20 = off table)
+    EDGE_RAW_THRESH: int = 25  # APDS off-table raw threshold (raw < 20 = off table)
     GESTURE_RAW_THRESH: int = (
         30  # Gesture sensor start/stop trigger (raw > 50 = hand present)
     )
