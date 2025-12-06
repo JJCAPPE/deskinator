@@ -164,7 +164,7 @@ class DeskinatorSimple:
         # Control (same as viz_demo)
         print("[Init] Initializing control...")
         self.wall_follower = SimpleWallFollower(
-            forward_speed=ALG.BOUNDARY_SPEED, turn_speed=LIMS.OMEGA_MAX
+            forward_speed=ALG.BOUNDARY_SPEED, turn_speed=LIMS.OMEGA_MAX * 0.5
         )
 
         # Planning (same as viz_demo)
@@ -181,21 +181,21 @@ class DeskinatorSimple:
         self.state = "WAIT_START"  # WAIT_START, BOUNDARY_DISCOVERY, COVERAGE, DONE
         self.trajectory = []
 
-        # Debouncing for edge detection (also reused for sensor hysteresis)
-        self.edge_drop_counts = {"left": 0, "right": 0}
-        self.edge_debounce_cycles = max(1, int(ALG.EDGE_DEBOUNCE * 50))  # 50 Hz loop
+        # Debouncing for edge detection (time-based, not cycle-based)
+        self.edge_drop_time = {"left": 0.0, "right": 0.0}
+        self.edge_debounce_time = getattr(ALG, "EDGE_DEBOUNCE", 0.12)
         # Per-sensor filters for raw->boolean smoothing
         self.sensor_filters = [
             {
                 "ewma": ALG.EDGE_RAW_THRESH,
                 "state": True,
-                "debounce": 0,
+                "debounce_time": 0.0,
                 "last_raw": ALG.EDGE_RAW_THRESH,
             },
             {
                 "ewma": ALG.EDGE_RAW_THRESH,
                 "state": True,
-                "debounce": 0,
+                "debounce_time": 0.0,
                 "last_raw": ALG.EDGE_RAW_THRESH,
             },
         ]
@@ -321,13 +321,13 @@ class DeskinatorSimple:
             print("\n[Start] Cancelled by user")
             return False
 
-    def _filter_sensor(self, idx: int, raw_val: Optional[int]) -> bool:
+    def _filter_sensor(self, idx: int, raw_val: Optional[int], dt: float) -> bool:
         """Convert raw sensor reading to stable boolean with EWMA + hysteresis + debounce."""
         info = self.sensor_filters[idx]
 
         # If no reading, assume safe/on-table
         if raw_val is None:
-            info["debounce"] = 0
+            info["debounce_time"] = 0.0
             info["last_raw"] = None
             return info["state"]
 
@@ -344,32 +344,32 @@ class DeskinatorSimple:
         info["last_raw"] = raw_val
 
         state = info["state"]
-        debounce = info["debounce"]
+        debounce_time = info["debounce_time"]
 
         if state:
             # Currently on-table; flip only after sustained low readings
             if ewma < off_thresh:
-                debounce += 1
-                if debounce >= self.edge_debounce_cycles:
+                debounce_time += dt
+                if debounce_time >= self.edge_debounce_time:
                     state = False
-                    debounce = 0
+                    debounce_time = 0.0
             else:
-                debounce = 0
+                debounce_time = 0.0
         else:
             # Currently off-table; require hysteresis + debounce to return to on-table
             if ewma > on_thresh:
-                debounce += 1
-                if debounce >= self.edge_debounce_cycles:
+                debounce_time += dt
+                if debounce_time >= self.edge_debounce_time:
                     state = True
-                    debounce = 0
+                    debounce_time = 0.0
             else:
-                debounce = 0
+                debounce_time = 0.0
 
         info["state"] = state
-        info["debounce"] = debounce
+        info["debounce_time"] = debounce_time
         return state
 
-    def _read_sensors(self) -> tuple:
+    def _read_sensors(self, dt: float) -> tuple:
         """Read proximity sensors.
 
         Returns:
@@ -385,7 +385,7 @@ class DeskinatorSimple:
             except Exception as e:
                 print(f"[Sensor] Left read error: {e}")
                 left_raw = None
-            left_on = self._filter_sensor(0, left_raw)
+            left_on = self._filter_sensor(0, left_raw, dt)
 
         if self.sensors[1] is not None:
             try:
@@ -393,7 +393,7 @@ class DeskinatorSimple:
             except Exception as e:
                 print(f"[Sensor] Right read error: {e}")
                 right_raw = None
-            right_on = self._filter_sensor(1, right_raw)
+            right_on = self._filter_sensor(1, right_raw, dt)
 
         return left_on, right_on
 
@@ -413,7 +413,7 @@ class DeskinatorSimple:
         # Log
         self.logger.log_edge(time.time(), (world_x, world_y), pose)
 
-    def _check_edge_events(self, left_on: bool, right_on: bool, pose: tuple):
+    def _check_edge_events(self, left_on: bool, right_on: bool, pose: tuple, dt: float):
         """Check for edge detection and add points with debouncing.
 
         Args:
@@ -423,22 +423,22 @@ class DeskinatorSimple:
         """
         # Update drop counters
         if not left_on:
-            self.edge_drop_counts["left"] += 1
+            self.edge_drop_time["left"] += dt
         else:
-            self.edge_drop_counts["left"] = 0
+            self.edge_drop_time["left"] = 0.0
 
         if not right_on:
-            self.edge_drop_counts["right"] += 1
+            self.edge_drop_time["right"] += dt
         else:
-            self.edge_drop_counts["right"] = 0
+            self.edge_drop_time["right"] = 0.0
 
-        # Trigger edge event after debounce cycles
-        if self.edge_drop_counts["left"] >= self.edge_debounce_cycles:
-            self.edge_drop_counts["left"] = 0
+        # Trigger edge event after debounce interval
+        if self.edge_drop_time["left"] >= self.edge_debounce_time:
+            self.edge_drop_time["left"] = 0.0
             self._add_edge_point(pose, "left")
 
-        if self.edge_drop_counts["right"] >= self.edge_debounce_cycles:
-            self.edge_drop_counts["right"] = 0
+        if self.edge_drop_time["right"] >= self.edge_debounce_time:
+            self.edge_drop_time["right"] = 0.0
             self._add_edge_point(pose, "right")
 
     def _drive_then_turn_controller(self, pose: tuple, waypoint: tuple) -> tuple:
@@ -536,7 +536,7 @@ class DeskinatorSimple:
             print("[Main] Vacuum fan disabled (--no-fan)")
 
         # Main loop parameters
-        dt = 0.02  # 50 Hz (20ms)
+        target_dt = 0.02  # 50 Hz target
         self.running = True
         self.state = "BOUNDARY_DISCOVERY"
 
@@ -546,11 +546,20 @@ class DeskinatorSimple:
 
         try:
             t = 0.0
+            last_loop_time = time.monotonic()
             last_viz_update = 0.0
             last_advance_time = -1.0  # For coverage waypoint debouncing
+            last_mode = 0  # Track motion mode for velocity resets
 
             while self.running:
                 loop_start = time.time()
+
+                # Measure actual loop dt (clamped for outliers)
+                now = time.monotonic()
+                dt = now - last_loop_time
+                last_loop_time = now
+                if dt > 0.1:
+                    dt = 0.05
 
                 # 1. Check gesture sensor for stop command
                 if self._check_gesture_toggle():
@@ -560,7 +569,7 @@ class DeskinatorSimple:
                         break
 
                 # 2. Read sensors (hardware)
-                left_on, right_on = self._read_sensors()
+                left_on, right_on = self._read_sensors(dt)
 
                 # 3. Get current pose (simple odometry)
                 pose = self.odom.pose()
@@ -568,7 +577,7 @@ class DeskinatorSimple:
 
                 # 4. Check for edge events (add points to rect_fit)
                 if self.state == "BOUNDARY_DISCOVERY":
-                    self._check_edge_events(left_on, right_on, pose)
+                    self._check_edge_events(left_on, right_on, pose, dt)
 
                 # 5. State machine and control
                 v_cmd = 0.0
@@ -665,6 +674,21 @@ class DeskinatorSimple:
                     self.running = False
 
                 # 6. Command motors (hardware)
+                current_mode = 0
+                if abs(v_cmd) > 1e-6 and abs(omega_cmd) < 1e-6:
+                    current_mode = 1  # pure translation
+                elif abs(v_cmd) < 1e-6 and abs(omega_cmd) > 1e-6:
+                    current_mode = 2  # pure rotation
+                elif abs(v_cmd) > 1e-6 and abs(omega_cmd) > 1e-6:
+                    current_mode = 3
+
+                if last_mode in (1, 2) and current_mode in (1, 2) and last_mode != current_mode:
+                    with self.stepper.lock:
+                        self.stepper.vL_current = 0.0
+                        self.stepper.vR_current = 0.0
+
+                last_mode = current_mode
+
                 self.stepper.command(v_cmd, omega_cmd)
 
                 # 7. Update odometry (hardware)
@@ -729,7 +753,7 @@ class DeskinatorSimple:
 
                 # 11. Sleep to maintain loop rate
                 elapsed = time.time() - loop_start
-                sleep_time = max(0, dt - elapsed)
+                sleep_time = max(0, target_dt - elapsed)
                 time.sleep(sleep_time)
                 t += dt
 
