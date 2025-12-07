@@ -41,13 +41,11 @@ class SimpleWallFollower:
     """
     Simple wall-following algorithm for boundary discovery.
 
-    Algorithm:
-    1. Go straight until finding a wall
-    2. If right sensor goes off, turn left until sensor is back + 2°
-    3. Go forwards until sensor goes off
-    4. Turn in the same direction as the first time until sensor is back on
-    5. Go forwards
-    6. Repeat until table is mapped out
+    Algorithm (simplified for smoother turning):
+    1. Drive straight until a sensor goes off the table
+    2. Pivot away from the dropped sensor at a constant rate
+    3. Keep pivoting continuously until sensors report on-table again
+    4. Resume straight motion and repeat to trace the boundary
     """
 
     def __init__(self, forward_speed: float = 0.1, turn_speed: float = 0.5):
@@ -72,13 +70,17 @@ class SimpleWallFollower:
         )
         self.start_pose: Optional[Tuple[float, float, float]] = None
         self.lap_complete = False
+        self.turning_active = False
+        self.sensor_on_streak = 0.0
+        self.turn_release_time = getattr(ALG, "EDGE_DEBOUNCE", 0.06)
+        self.prev_left_on = True
+        self.prev_right_on = True
 
         # Rotation tracking for IMU-based completion
         self.total_rotation = 0.0  # Cumulative rotation in radians
         self.last_theta: Optional[float] = None  # Previous theta for rotation tracking
 
         # Parameters
-        self.sensor_back_threshold = 2.0  # degrees
         self.lap_close_distance = 0.1  # m - distance to start to consider lap complete
         self.rotation_completion_threshold = 2.1 * np.pi  # 360 degrees in radians
 
@@ -139,106 +141,72 @@ class SimpleWallFollower:
         if self.lap_complete:
             return 0.0, 0.0
 
-        # State machine
-        if self.state == WallFollowState.FIND_WALL:
-            # Go straight until we hit a wall (sensor goes off)
-            if not right_sensor_on or not left_sensor_on:
-                # Hit a wall - determine which sensor and set initial direction
-                if not right_sensor_on:
-                    self.turn_direction = 1.0  # Turn left (CCW)
-                    self.initial_turn_direction = 1.0  # Store for consistency
-                    self._add_edge_point(pose, "right")
-                elif not left_sensor_on:
-                    self.turn_direction = -1.0  # Turn right (CW)
-                    self.initial_turn_direction = -1.0  # Store for consistency
-                    self._add_edge_point(pose, "left")
-                # Start turning away
-                self.sensor_back_theta = None
-                self.state = WallFollowState.TURN_AWAY
-            return self.forward_speed, 0.0
+        # Track edge transitions for logging/rectangle fit
+        if self.prev_right_on and not right_sensor_on:
+            self._add_edge_point(pose, "right")
+        if self.prev_left_on and not left_sensor_on:
+            self._add_edge_point(pose, "left")
 
-        elif self.state == WallFollowState.TURN_AWAY:
-            # Turn away from wall until sensor is back + 2°
-            # Check if sensor is back on
-            sensor_back = False
-            if self.turn_direction > 0:  # Turning left (away from right wall)
-                sensor_back = right_sensor_on
-            else:  # Turning right (away from left wall)
-                sensor_back = left_sensor_on
+        # Continuous turn-away logic: pivot away from any dropped sensor and
+        # keep turning until sensors have been on-table for a short hold time.
+        off_left = not left_sensor_on
+        off_right = not right_sensor_on
 
-            if sensor_back:
-                if self.sensor_back_theta is None:
-                    # Just got sensor back - record angle and continue turning
-                    self.sensor_back_theta = theta
-                else:
-                    # Continue turning until we've turned 2° past sensor back point
-                    dtheta = theta - self.sensor_back_theta
-                    dtheta = (
-                        (dtheta + np.pi) % (2 * np.pi)
-                    ) - np.pi  # Wrap to [-pi, pi]
+        v_cmd = self.forward_speed
+        omega_cmd = 0.0
 
-                    if abs(dtheta) >= np.deg2rad(self.sensor_back_threshold):
-                        # Reached target angle, now go forward
-                        self.state = WallFollowState.FORWARD_UNTIL_OFF
-            else:
-                # Sensor not back yet, keep turning
-                pass
+        if off_left or off_right:
+            self.state = WallFollowState.TURN_AWAY
+            self.turning_active = True
+            self.sensor_on_streak = 0.0
 
-            return 0.0, self.turn_speed * self.turn_direction
-
-        elif self.state == WallFollowState.FORWARD_UNTIL_OFF:
-            # Go forward until sensor goes off (hitting next corner/edge)
-            if not right_sensor_on or not left_sensor_on:
-                if not right_sensor_on:
-                    self._add_edge_point(pose, "right")
-                if not left_sensor_on:
-                    self._add_edge_point(pose, "left")
-                # Turn in same direction as before
-                self.state = WallFollowState.TURN_BACK
-            return self.forward_speed, 0.0
-
-        elif self.state == WallFollowState.TURN_BACK:
-            # Turn in same direction until sensor is back on
-            sensor_back = False
-            if self.turn_direction > 0:  # Turning left
-                sensor_back = right_sensor_on
-            else:  # Turning right
-                sensor_back = left_sensor_on
-
-            if sensor_back:
-                self.state = WallFollowState.FORWARD_ALONG_WALL
-            return 0.0, self.turn_speed * self.turn_direction
-
-        elif self.state == WallFollowState.FORWARD_ALONG_WALL:
-            # Go forward along wall
-            # Check if we hit an edge
-            if not right_sensor_on or not left_sensor_on:
-                if not right_sensor_on:
-                    self._add_edge_point(pose, "right")
-                elif not left_sensor_on:
-                    self._add_edge_point(pose, "left")
-
-                # Maintain consistent direction based on initial turn direction
-                # The turn direction should match the initial direction to keep going
-                # in the same direction (clockwise or counterclockwise) around the table
-                if self.initial_turn_direction is not None:
+            if off_right and not off_left:
+                self.turn_direction = 1.0  # Turn left away from right edge
+                if self.initial_turn_direction is None:
+                    self.initial_turn_direction = 1.0
+            elif off_left and not off_right:
+                self.turn_direction = -1.0  # Turn right away from left edge
+                if self.initial_turn_direction is None:
+                    self.initial_turn_direction = -1.0
+            else:  # both sensors off, keep consistent direction
+                if self.turn_direction == 0.0 and self.initial_turn_direction is not None:
                     self.turn_direction = self.initial_turn_direction
-                else:
-                    # Fallback: determine direction based on which sensor went off
-                    if not right_sensor_on:
-                        self.turn_direction = 1.0  # Turn left (CCW)
-                    elif not left_sensor_on:
-                        self.turn_direction = -1.0  # Turn right (CW)
+                elif self.turn_direction == 0.0:
+                    self.turn_direction = 1.0
+                if self.initial_turn_direction is None:
+                    self.initial_turn_direction = self.turn_direction
 
-                # Go back to turn away state
-                self.sensor_back_theta = None
+            v_cmd = 0.0
+            omega_cmd = self.turn_speed * self.turn_direction
+
+        elif self.turning_active:
+            # Stay turning until sensors are back on for the hold time to avoid jitter
+            if left_sensor_on and right_sensor_on:
+                self.sensor_on_streak += dt
+            else:
+                self.sensor_on_streak = 0.0
+
+            if self.sensor_on_streak >= self.turn_release_time:
+                self.turning_active = False
+                self.sensor_on_streak = 0.0
+                self.state = WallFollowState.FORWARD_ALONG_WALL
+            else:
+                v_cmd = 0.0
+                omega_cmd = self.turn_speed * self.turn_direction
                 self.state = WallFollowState.TURN_AWAY
-                return self.forward_speed, 0.0
 
-            # Normal forward motion
-            return self.forward_speed, 0.0
+        else:
+            # Sensors are on and we are not currently turning
+            self.state = (
+                WallFollowState.FORWARD_ALONG_WALL
+                if self.initial_turn_direction is not None
+                else WallFollowState.FIND_WALL
+            )
+            self.sensor_on_streak = 0.0
 
-        return 0.0, 0.0
+        self.prev_left_on = left_sensor_on
+        self.prev_right_on = right_sensor_on
+        return v_cmd, omega_cmd
 
     def _add_edge_point(self, pose: Tuple[float, float, float], side: str):
         """Add an edge point based on sensor position."""
