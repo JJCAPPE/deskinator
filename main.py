@@ -184,6 +184,14 @@ class DeskinatorSimple:
         # Debouncing for edge detection (also reused for sensor hysteresis)
         self.edge_drop_counts = {"left": 0, "right": 0}
         self.edge_debounce_cycles = max(1, int(ALG.EDGE_DEBOUNCE * 50))  # 50 Hz loop
+        # Faster per-sensor debounce for boundary driving (minimal smoothing)
+        self.fast_sensor_state = [
+            {"state": True, "debounce": 0},
+            {"state": True, "debounce": 0},
+        ]
+        self.fast_edge_debounce_cycles = max(
+            1, int(getattr(ALG, "EDGE_FAST_DEBOUNCE", 0.02) * 50)
+        )
         # Per-sensor filters for raw->boolean smoothing
         self.sensor_filters = [
             {
@@ -204,6 +212,16 @@ class DeskinatorSimple:
         self.gesture_debounce_counter = 0
         self.gesture_active_prev = False
         self.cleaning_active = False  # True when cleaning is running
+
+        # Boundary tracking
+        self.boundary_rotation = 0.0
+        self.boundary_last_theta = None
+        self.boundary_start_pose = None
+        self.prev_boundary_omega = 0.0
+        self.prev_boundary_v = 0.0
+        for info in self.fast_sensor_state:
+            info["state"] = True
+            info["debounce"] = 0
 
         print("[Init] Initialization complete")
         print("=" * 60)
@@ -397,6 +415,55 @@ class DeskinatorSimple:
 
         return left_on, right_on
 
+    def _read_sensors_fast(self) -> tuple:
+        """Read proximity sensors with minimal filtering for quick edge response."""
+
+        def _debounce(idx: int, raw_on: bool) -> bool:
+            info = self.fast_sensor_state[idx]
+            state = info["state"]
+            debounce = info["debounce"]
+
+            if state:
+                if not raw_on:
+                    debounce += 1
+                    if debounce >= self.fast_edge_debounce_cycles:
+                        state = False
+                        debounce = 0
+                else:
+                    debounce = 0
+            else:
+                if raw_on:
+                    debounce += 1
+                    if debounce >= self.fast_edge_debounce_cycles:
+                        state = True
+                        debounce = 0
+                else:
+                    debounce = 0
+
+            info["state"] = state
+            info["debounce"] = debounce
+            return state
+
+        left_on_raw = True
+        right_on_raw = True
+
+        if self.sensors[0] is not None:
+            try:
+                left_raw = self.sensors[0].read_proximity_raw()
+                left_on_raw = left_raw is None or left_raw > ALG.EDGE_RAW_THRESH
+            except Exception as e:
+                print(f"[Sensor] Left read error: {e}")
+        if self.sensors[1] is not None:
+            try:
+                right_raw = self.sensors[1].read_proximity_raw()
+                right_on_raw = right_raw is None or right_raw > ALG.EDGE_RAW_THRESH
+            except Exception as e:
+                print(f"[Sensor] Right read error: {e}")
+
+        left_on = _debounce(0, left_on_raw)
+        right_on = _debounce(1, right_on_raw)
+        return left_on, right_on
+
     def _add_edge_point(self, pose: tuple, side: str):
         """Add edge detection point to rectangle fitter.
 
@@ -440,6 +507,71 @@ class DeskinatorSimple:
         if self.edge_drop_counts["right"] >= self.edge_debounce_cycles:
             self.edge_drop_counts["right"] = 0
             self._add_edge_point(pose, "right")
+
+    def _reset_boundary_progress(self):
+        """Reset boundary tracking accumulators."""
+        self.boundary_rotation = 0.0
+        self.boundary_last_theta = None
+        self.boundary_start_pose = None
+        self.prev_boundary_omega = 0.0
+        self.prev_boundary_v = 0.0
+
+    def _update_boundary_progress(self, pose: tuple) -> bool:
+        """Track rotation and detect when a lap of the table is complete."""
+        x, y, theta = pose
+        if self.boundary_start_pose is None:
+            self.boundary_start_pose = pose
+            self.boundary_last_theta = theta
+            return False
+
+        if self.boundary_last_theta is not None:
+            dtheta = theta - self.boundary_last_theta
+            dtheta = ((dtheta + np.pi) % (2 * np.pi)) - np.pi
+            self.boundary_rotation += abs(dtheta)
+        self.boundary_last_theta = theta
+
+        rotation_thresh = getattr(ALG, "BOUNDARY_ROT_THRESH", 2.1 * np.pi)
+        min_edges = getattr(ALG, "BOUNDARY_MIN_EDGES", 8)
+        lap_dist = getattr(ALG, "BOUNDARY_LAP_DIST", 0.15)
+
+        if len(self.rect_fit.edge_points) < min_edges:
+            return False
+
+        dx = x - self.boundary_start_pose[0]
+        dy = y - self.boundary_start_pose[1]
+        dist = np.sqrt(dx * dx + dy * dy)
+        heading_err = abs(
+            ((theta - self.boundary_start_pose[2] + np.pi) % (2 * np.pi)) - np.pi
+        )
+
+        close_enough = dist < lap_dist
+        heading_ok = heading_err < np.deg2rad(60)
+        rotated_enough = self.boundary_rotation >= rotation_thresh
+
+        return rotated_enough and close_enough and heading_ok
+
+    def _boundary_controller_simple(self, left_on: bool, right_on: bool) -> tuple:
+        """Reactive boundary controller for smooth, quick responses."""
+        forward_speed = ALG.BOUNDARY_SPEED
+        turn_speed = min(LIMS.OMEGA_MAX * 0.8, 0.35)
+        backoff_speed = min(getattr(ALG, "BOUNDARY_BACKOFF_SPEED", 0.03), LIMS.V_REV_MAX)
+        blend = 0.4  # low-pass to reduce stepper chatter
+
+        if left_on and right_on:
+            v_cmd, omega_cmd = forward_speed, 0.0
+        elif not right_on and left_on:
+            v_cmd, omega_cmd = 0.0, turn_speed  # turn left
+        elif not left_on and right_on:
+            v_cmd, omega_cmd = 0.0, -turn_speed  # turn right
+        else:
+            v_cmd, omega_cmd = -backoff_speed, 0.0  # both off: gentle back-off
+
+        v_cmd = blend * self.prev_boundary_v + (1.0 - blend) * v_cmd
+        omega_cmd = blend * self.prev_boundary_omega + (1.0 - blend) * omega_cmd
+
+        self.prev_boundary_v = v_cmd
+        self.prev_boundary_omega = omega_cmd
+        return v_cmd, omega_cmd
 
     def _drive_then_turn_controller(self, pose: tuple, waypoint: tuple) -> tuple:
         """Drive-then-turn controller matching viz_demo.py logic.
@@ -539,6 +671,7 @@ class DeskinatorSimple:
         dt = 0.02  # 50 Hz (20ms)
         self.running = True
         self.state = "BOUNDARY_DISCOVERY"
+        self._reset_boundary_progress()
 
         print("[Main] Starting main loop...")
         print("  State: BOUNDARY_DISCOVERY")
@@ -560,7 +693,10 @@ class DeskinatorSimple:
                         break
 
                 # 2. Read sensors (hardware)
-                left_on, right_on = self._read_sensors()
+                if self.state == "BOUNDARY_DISCOVERY":
+                    left_on, right_on = self._read_sensors_fast()
+                else:
+                    left_on, right_on = self._read_sensors()
 
                 # 3. Get current pose (simple odometry)
                 pose = self.odom.pose()
@@ -575,9 +711,9 @@ class DeskinatorSimple:
                 omega_cmd = 0.0
 
                 if self.state == "BOUNDARY_DISCOVERY":
-                    # Use SimpleWallFollower (same as viz_demo)
-                    v_cmd, omega_cmd = self.wall_follower.update(
-                        pose, left_on, right_on, dt
+                    # Simple reactive boundary controller for smooth turns
+                    v_cmd, omega_cmd = self._boundary_controller_simple(
+                        left_on, right_on
                     )
 
                     # Fit rectangle periodically
@@ -588,11 +724,9 @@ class DeskinatorSimple:
                         self.rect_fit.fit()
 
                     # Check completion (rotation-based)
-                    if self.wall_follower.is_complete():
+                    if self._update_boundary_progress(pose):
                         print(f"\n[Main] Wall following complete!")
-                        print(
-                            f"  Total rotation: {self.wall_follower.get_total_rotation_degrees():.1f}°"
-                        )
+                        print(f"  Total rotation: {np.rad2deg(self.boundary_rotation):.1f}°")
                         print(
                             f"  Collected {len(self.rect_fit.edge_points)} edge points"
                         )
@@ -708,7 +842,7 @@ class DeskinatorSimple:
                     status = f"State: {self.state}\n"
                     status += f"Time: {t:.1f}s\n"
                     if self.state == "BOUNDARY_DISCOVERY":
-                        rotation = self.wall_follower.get_total_rotation_degrees()
+                        rotation = np.rad2deg(self.boundary_rotation)
                         status += f"Rotation: {rotation:.1f}°\n"
                         status += f"Edge points: {len(self.rect_fit.edge_points)}"
                     elif self.state == "COVERAGE" and rectangle:
