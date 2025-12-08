@@ -67,7 +67,7 @@ A high-level glass-box diagram summarizing the system’s sensing, computation, 
 
 == Problem Statement
 
-*The goal is to design a device that can clean and maintain shared EK131-210 desks in between uses, to ensure that students have a debris-free and sanitary workspace, without requiring a staff to manually wipe down each desk during classes.*
+*The goal is to design a device that can clean and maintain shared EK131-210 desks in between uses, to ensure that students have a debris-free and sanitary workspace, without requiring staff to manually wipe down each desk during classes.*
 
 == Key Objectives and Metrics
 
@@ -104,7 +104,7 @@ Concept generation and selection for the Deskinator is documented in the morph c
 
 === Extended Kalman Filter (EKF) for Localization
 
-The EKF in slam/ekf.py (see Appendix @app:code) is the foundation of the robot's self-awareness on the table. It maintains a probabilistic estimate of the robot's pose $(x, y, theta)$ by fusing two complementary sensor streams, which are the wheel odometry from the stepper motors and yaw rate from the MPU-6050 gyroscope. The prediction step uses differential drive kinematics to propagate position based on wheel displacements, while the gyro update corrects angular drift that accumulates from wheel slip. The filter also implements tactile localization via update_line_constraint(). This happens when the robot detects a table edge during the coverage phase through the APDS9960 front facing sensors, it therefore knows it must be on the boundary of the table and snaps its position to that known wall. This closed-loop correction keeps cumulative drift bounded even during long cleaning sessions by enforcing known constraints (eg. table edges are at 90°) to the pose graph estimation model.
+The EKF in slam/ekf.py (see Appendix @app:code) is the foundation of the robot's self-awareness on the table. It maintains a probabilistic estimate of the robot's pose $(x, y, theta)$ by fusing two complementary sensor streams, which are the wheel odometry from the stepper motors and yaw rate from the MPU-6050 gyroscope. The prediction step uses differential drive kinematics to propagate position based on wheel displacements, while the gyro update corrects angular drift that accumulates from wheel slip. The filter also implements tactile localization via update_line_constraint(). This happens when the robot detects a table edge during the coverage phase through the APDS9960 front facing sensors, it therefore knows it must be on the boundary of the table and snaps its position to that known wall. This closed-loop correction keeps cumulative drift bounded even during long cleaning sessions by enforcing known constraints (e.g. table edges are at 90°) to the pose graph estimation model.
 
 === Wall Follower with Bump-and-Turn Logic
 
@@ -164,7 +164,7 @@ All trial data was exported to Excel spreadsheets containing both raw measuremen
 
 === Coverage of inset (safe) rectangle
 
-This is the most crucial metric to demonstrate the efficacy of the deskinator, as it measures the swept ‘safe' area by the fan. This area is calculated by applying a margin equal to the distance between the sensor line and the start of the fan line, and then used to calculate the boustrophedon path. This ensures that the robot doesn't attempt to step outside of the table area it has identified. Therefore, this is effectively the only area we can safely sweep. Testing shows a range of values (% of area swept) between 96,95% and 100%, with a mean of 99.40% and standard deviation of 0.70%, indicating highly effective sweeping of the reachable area of the table, therefore meeting the main Key Objective of the project.
+This is the most crucial metric to demonstrate the efficacy of the Deskinator, as it measures the swept ‘safe' area by the fan. This area is calculated by applying a margin equal to the distance between the sensor line and the start of the fan line, and then used to calculate the boustrophedon path. This ensures that the robot doesn't attempt to step outside of the table area it has identified. Therefore, this is effectively the only area we can safely sweep. Testing shows a range of values (% of area swept) between 96.95% and 100%, with a mean of 99.40% and standard deviation of 0.70%, indicating highly effective sweeping of the reachable area of the table, therefore meeting the main Key Objective of the project.
 
 #figure(
   image("images/distribution-coverage-inset.png", width: 50%),
@@ -173,7 +173,7 @@ This is the most crucial metric to demonstrate the efficacy of the deskinator, a
 
 === Time Metrics
 
-Another crucial aspect of the successful and efficient implementation of the deskinator is its speed. One of the Key Objectives was for the full sweeping of the table to be completed in under 120 seconds. The conducted testing used conservative linear and angular velocity limits (see config.py) but still achieved a mean completion time of 137 seconds, a standard deviation of 3.57 seconds, and a maximum value of 146,25 seconds. Increasing the linear and angular velocity limits by just 21.875% would reduce maximum times to 120 seconds, as well as significantly decreasing the mean time. Testing with higher limits has been conducted and showed improved speed performance, but lower limits were chosen for repeated performance due to concerns linked to overheating of the A4988 motor drivers. The addition of a heatsink would solve these issues, effectively decreasing mean operating time.
+Another crucial aspect of the successful and efficient implementation of the Deskinator is its speed. One of the Key Objectives was for the full sweeping of the table to be completed in under 120 seconds. The conducted testing used conservative linear and angular velocity limits (see config.py) but still achieved a mean completion time of 137 seconds, a standard deviation of 3.57 seconds, and a maximum value of 146.25 seconds. Increasing the linear and angular velocity limits by just 21.875% would reduce maximum times to 120 seconds, as well as significantly decreasing the mean time. Testing with higher limits has been conducted and showed improved speed performance, but lower limits were chosen for repeated performance due to concerns linked to overheating of the A4988 motor drivers. The addition of a heatsink would solve these issues, effectively decreasing mean operating time.
 
 #figure(
   image("images/distribution-time.png", width: 100%),
@@ -206,7 +206,7 @@ APDS9960 proximity sensing was validated across distances to set reliable thresh
 
 === Motor Characterization
 
-The motors where characterized by testing their anguar rotation accuracy against a rotary encoder in order to evaluate their error in odometry. Results showed highly accurate actuation, with a mean error of $0.01 "degrees"$, a standard deviation of $0.03 "degrees"$ over $1190$ steps. This is a very small error, and is therefore considered to be negligible in our odometry calculations.
+The motors were characterized by testing their angular rotation accuracy against a rotary encoder in order to evaluate their error in odometry. Results showed highly accurate actuation, with a mean error of $0.01 "degrees"$, a standard deviation of $0.03 "degrees"$ over $1190$ steps. This is a very small error, and is therefore considered to be negligible in our odometry calculations.
 
 #figure(
   image("images/distribution-motor-errors.png", width: 50%),
@@ -261,7 +261,7 @@ The current vacuum system is not effective in collecting larger or denser debris
 
 == UX Simplification
 
-The current UX is not very beginner and non-technical-user friendly. The need to ssh into the machine, manually download the code and run it makes it a tedious and technical process. Creating a simple web-app that can be downloaded as an executable and run locally would simplify the process and make it more accessible to a wider audience. The web-app would abstract the complexity of connecting to the robot by providing a simple interface to guide the users thorugh the process of connecting to the robot and running the cleaning process.
+The current UX is not very beginner and non-technical-user friendly. The need to ssh into the machine, manually download the code and run it makes it a tedious and technical process. Creating a simple web-app that can be downloaded as an executable and run locally would simplify the process and make it more accessible to a wider audience. The web-app would abstract the complexity of connecting to the robot by providing a simple interface to guide the users through the process of connecting to the robot and running the cleaning process.
 
 
 #pagebreak()
@@ -439,6 +439,5 @@ $ "Estimated continuous operation: " approx 3 "hours" $
 The full Python codebase (SLAM, planning, control, visualization, and tests) is in this git project repository.
 
 #link("https://github.com/JJCAPPE/deskinator.git")
-
 
 
